@@ -23,22 +23,87 @@ $('zipInput').onchange=async e=>{let f=e.target.files[0];if(!f)return;try{$('imp
 $('clearPhotos').onclick=async()=>{if(confirm('登録した写真をすべて削除しますか？配置データも消去されます。')){await clearStore();assignments=[];previewReady=false;await metaPut('assignments',[]);await renderPhotos();await refreshStats();}};
 $('sourceInput').onchange=async e=>{let f=e.target.files[0];if(!f)return;sourceBlob=f;sourceName=f.name;$('sourceStatus').textContent=`原画：${f.name}`;let bmp=await createImageBitmap(f);let c=$('preview'),ctx=c.getContext('2d');let scale=Math.min(c.width/bmp.width,c.height/bmp.height);let w=bmp.width*scale,h=bmp.height*scale;ctx.fillStyle='#fff';ctx.fillRect(0,0,c.width,c.height);ctx.drawImage(bmp,(c.width-w)/2,(c.height-h)/2,w,h);bmp.close();await metaPut('source',{blob:f,name:f.name});};
 async function getSource(){if(sourceBlob)return sourceBlob;let x=await metaGet('source');if(x){sourceBlob=x.blob;sourceName=x.name;return sourceBlob;}return null;}
-async function imageAverage(blob){let bmp=await createImageBitmap(blob);let c=document.createElement('canvas');c.width=8;c.height=8;let ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(bmp,0,0,8,8);let d=ctx.getImageData(0,0,8,8).data;let s=[0,0,0];for(let i=0;i<d.length;i+=4){s[0]+=d[i];s[1]+=d[i+1];s[2]+=d[i+2];}bmp.close();return s.map(v=>v/64);}
-$('makeMosaic').onclick=async()=>{if(busy)return;let src=await getSource();photos=await allPhotos();let cols=+$('cols').value,rows=+$('rows').value,N=cols*rows;if(!Number.isInteger(cols)||!Number.isInteger(rows)||cols<1||rows<1||cols>120||rows>120){alert('列数・行数は1～120の整数で指定してください。');return;}if(!src){alert('先に元画像を選択してください');return;}if(photos.length<N){alert(`写真が不足しています。${N}枚必要ですが、現在${photos.length}枚です。`);return;}busy=true;$('makeStatus').textContent='写真の色を解析しています…';setProgress('makeProgress',0);try{let source=await createImageBitmap(src),targets=[];let c=document.createElement('canvas');c.width=cols;c.height=rows;let ctx=c.getContext('2d',{willReadFrequently:true});let ar=cols/rows,sar=source.width/source.height,sx=0,sy=0,sw=source.width,sh=source.height;if(sar>ar){sw=source.height*ar;sx=(source.width-sw)/2;}else{sh=source.width/ar;sy=(source.height-sh)/2;}ctx.drawImage(source,sx,sy,sw,sh,0,0,cols,rows);let d=ctx.getImageData(0,0,cols,rows).data;for(let i=0;i<N;i++)targets.push([d[i*4],d[i*4+1],d[i*4+2]]);source.close();let feats=[];for(let i=0;i<photos.length;i++){feats.push(await imageAverage(photos[i].thumb||photos[i].blob));if(i%30===0){setProgress('makeProgress',i/photos.length*35);$('makeStatus').textContent=`写真解析 ${i}/${photos.length}`;await new Promise(r=>setTimeout(r,0));}}
-let unused=new Set(photos.map((_,i)=>i)),result=new Array(N);for(let i=0;i<N;i++){let t=targets[i],best=-1,bd=Infinity;for(let j of unused){let f=feats[j],dr=t[0]-f[0],dg=t[1]-f[1],db=t[2]-f[2],dist=dr*dr+dg*dg+db*db;if(dist<bd){bd=dist;best=j;}}result[i]=photos[best].id;unused.delete(best);if(i%15===0){setProgress('makeProgress',35+i/N*65);$('makeStatus').textContent=`写真を割り当て中 ${i}/${N}`;await new Promise(r=>setTimeout(r,0));}}
-assignments=result;previewReady=false;$('previewStatus').textContent='配置が更新されました。プレビューを作り直してください。';await metaPut('assignments',assignments);await metaPut('grid',{cols,rows});$('makeStatus').textContent=`完了：${N.toLocaleString()}マスに重複なしで配置しました。`;await refreshStats();}catch(e){alert('配置中にエラーが発生しました：'+e.message);}busy=false;};
+function rgbToLab(rgb){
+ const [r0,g0,b0]=rgb.map(v=>{v=v/255;return v<=0.04045?v/12.92:Math.pow((v+0.055)/1.055,2.4)});
+ const x=(0.4124564*r0+0.3575761*g0+0.1804375*b0)/0.95047;
+ const y=(0.2126729*r0+0.7151522*g0+0.0721750*b0);
+ const z=(0.0193339*r0+0.1191920*g0+0.9503041*b0)/1.08883;
+ const f=t=>t>Math.pow(6/29,3)?Math.cbrt(t):t/(3*Math.pow(6/29,2))+4/29;
+ const fx=f(x),fy=f(y),fz=f(z);return [116*fy-16,500*(fx-fy),200*(fy-fz)];
+}
+function tileCropRect(w,h,aspect){let a=w/h;if(a>aspect){let nw=h*aspect;return [(w-nw)/2,0,nw,h];}let nh=w/aspect;return [0,(h-nh)/2,w,nh];}
+async function imageFeatures(blob,aspect){
+ const bmp=await createImageBitmap(blob);const [sx,sy,sw,sh]=tileCropRect(bmp.width,bmp.height,aspect);
+ const c=document.createElement('canvas');c.width=32;c.height=32;const ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(bmp,sx,sy,sw,sh,0,0,32,32);bmp.close();
+ const d=ctx.getImageData(0,0,32,32).data;let r=0,g=0,b=0,lum=0,lum2=0;
+ for(let i=0;i<d.length;i+=4){r+=d[i];g+=d[i+1];b+=d[i+2];const l=.2126*d[i]+.7152*d[i+1]+.0722*d[i+2];lum+=l;lum2+=l*l;}
+ const n=1024,mean=lum/n;return {rgb:[r/n,g/n,b/n],lab:rgbToLab([r/n,g/n,b/n]),std:Math.sqrt(Math.max(0,lum2/n-mean*mean))};
+}
+function yieldUI(){return new Promise(r=>setTimeout(r,0));}
+$('makeMosaic').onclick=async()=>{
+ if(busy)return;let src=await getSource();photos=await allPhotos();
+ let cols=+$('cols').value,rows=+$('rows').value,N=cols*rows;
+ let tileW=+$('tileW').value||38.1,tileH=+$('tileH').value||26.7,aspect=tileW/tileH;
+ if(!Number.isInteger(cols)||!Number.isInteger(rows)||cols<1||rows<1||cols>120||rows>120){alert('列数・行数は1～120の整数で指定してください。');return;}
+ if(!(tileW>0&&tileH>0)){alert('タイル寸法は0より大きい数値にしてください。');return;}
+ if(!src){alert('先に元画像を選択してください');return;}
+ if(photos.length<N){alert(`写真が不足しています。${N}枚必要ですが、現在${photos.length}枚です。`);return;}
+ busy=true;$('makeMosaic').disabled=true;$('makeStatus').textContent='原画を実寸比率に合わせて解析しています…';setProgress('makeProgress',0);
+ try{
+  const source=await createImageBitmap(src),targets=new Array(N),targetLab=new Array(N),edgeStrength=new Float32Array(N);
+  const physicalRatio=(cols*tileW)/(rows*tileH),sxsy=tileCropRect(source.width,source.height,physicalRatio);
+  const tc=document.createElement('canvas');tc.width=cols;tc.height=rows;const tctx=tc.getContext('2d',{willReadFrequently:true});
+  tctx.drawImage(source,sxsy[0],sxsy[1],sxsy[2],sxsy[3],0,0,cols,rows);
+  const td=tctx.getImageData(0,0,cols,rows).data, lum=new Float32Array(N);
+  for(let i=0;i<N;i++){const rgb=[td[i*4],td[i*4+1],td[i*4+2]];targets[i]=rgb;targetLab[i]=rgbToLab(rgb);lum[i]=.2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2];}
+  source.close();let maxEdge=1;
+  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){let i=r*cols+c,gx=((c<cols-1?lum[i+1]:lum[i])-(c>0?lum[i-1]:lum[i]))*.5,gy=((r<rows-1?lum[i+cols]:lum[i])-(r>0?lum[i-cols]:lum[i]))*.5;edgeStrength[i]=Math.hypot(gx,gy);if(edgeStrength[i]>maxEdge)maxEdge=edgeStrength[i];}
+  let sortedEdges=Array.from(edgeStrength).sort((a,b)=>a-b),scale=Math.max(1,sortedEdges[Math.floor(.9*(N-1))]||1);
+  for(let i=0;i<N;i++)edgeStrength[i]=Math.min(1,edgeStrength[i]/scale);
+  const photoFeat=new Array(photos.length);
+  for(let i=0;i<photos.length;i++){photoFeat[i]=await imageFeatures(photos[i].thumb||photos[i].blob,aspect);if(i%20===0){setProgress('makeProgress',i/photos.length*25);$('makeStatus').textContent=`写真の特徴を解析中 ${i+1}/${photos.length}`;await yieldUI();}}
+  const targetStd=new Float32Array(N);
+  // Estimate source detail inside each physical tile (8x8 samples per tile).
+  const dc=document.createElement('canvas');dc.width=cols*8;dc.height=rows*8;const dctx=dc.getContext('2d',{willReadFrequently:true});
+  const src2=await createImageBitmap(src);dctx.drawImage(src2,sxsy[0],sxsy[1],sxsy[2],sxsy[3],0,0,cols*8,rows*8);src2.close();const dd=dctx.getImageData(0,0,dc.width,dc.height).data;
+  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){let sum=0,sum2=0;for(let yy=0;yy<8;yy++)for(let xx=0;xx<8;xx++){let k=(((r*8+yy)*dc.width)+(c*8+xx))*4,l=.2126*dd[k]+.7152*dd[k+1]+.0722*dd[k+2];sum+=l;sum2+=l*l;}let m=sum/64;targetStd[r*cols+c]=Math.sqrt(Math.max(0,sum2/64-m*m));}
+  // Greedy one-to-one initialization using CIE Lab and edge-aware lightness.
+  let used=new Uint8Array(photos.length),result=new Int32Array(N);
+  for(let i=0;i<N;i++){let t=targetLab[i],best=-1,bd=Infinity,ew=1.3+.85*edgeStrength[i];for(let j=0;j<photos.length;j++){if(used[j])continue;let p=photoFeat[j].lab,dl=(t[0]-p[0])*ew,da=(t[1]-p[1])*.68,db=(t[2]-p[2])*.68,ds=targetStd[i]-photoFeat[j].std;let cost=dl*dl+da*da+db*db+ds*ds*.035;if(cost<bd){bd=cost;best=j;}}if(best<0)throw Error('写真の割り当てに失敗しました。');result[i]=best;used[best]=1;if(i%12===0){setProgress('makeProgress',25+i/N*40);$('makeStatus').textContent=`写真を割り当て中 ${i+1}/${N}`;await yieldUI();}}
+  // Refine local and global swaps to improve adjacent Lab transitions.
+  const neighbors=Array.from({length:N},(_,i)=>{let a=[],r=Math.floor(i/cols),c=i%cols;if(c>0)a.push(i-1);if(c+1<cols)a.push(i+1);if(r>0)a.push(i-cols);if(r+1<rows)a.push(i+cols);return a;});
+  const edges=[];for(let i=0;i<N;i++)for(const j of neighbors[i])if(j>i){const a=targetLab[i],b=targetLab[j],delta=[a[0]-b[0],(a[1]-b[1])*.38,(a[2]-b[2])*.38],strength=Math.hypot(...delta),importance=.30+.70*Math.min(strength/24,1);edges.push([i,j,delta,importance]);}
+  const photoTrans=photoFeat.map(x=>[x.lab[0],x.lab[1]*.38,x.lab[2]*.38]);
+  const edgeCost=(e,arr)=>{let [a,b,d,w]=e,pa=photoTrans[arr[a]],pb=photoTrans[arr[b]],x=d[0]-(pa[0]-pb[0]),y=d[1]-(pa[1]-pb[1]),z=d[2]-(pa[2]-pb[2]);return (x*x+y*y+z*z)*w;};
+  let seed=20261026;const rand=max=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return (seed>>>0)%max;};
+  const attempts=Math.min(12000,Math.max(4500,N*4));
+  for(let step=0;step<attempts;step++){
+   let a=rand(N),b;if(step%3!==0){let ns=neighbors[a];b=ns[rand(ns.length)];}else{b=rand(N-1);if(b>=a)b++;}
+   let pa=result[a],pb=result[b],fa=photoFeat[pa],fb=photoFeat[pb],ta=targetLab[a],tb=targetLab[b];
+   const unary=(cell,ph)=>{let t=targetLab[cell],ew=1.3+.85*edgeStrength[cell],dl=(t[0]-ph.lab[0])*ew,da=(t[1]-ph.lab[1])*.68,db=(t[2]-ph.lab[2])*.68,ds=targetStd[cell]-ph.std;return dl*dl+da*da+db*db+ds*ds*.035;};
+   let delta=unary(a,fb)+unary(b,fa)-unary(a,fa)-unary(b,fb);
+   const affected=new Set([...neighbors[a],...neighbors[b]]);affected.add(a);affected.add(b);let before=0,after=0;
+   for(const x of affected)for(const y of neighbors[x])if(x<y&&(x===a||x===b||y===a||y===b)){let e=[x,y,[targetLab[x][0]-targetLab[y][0],(targetLab[x][1]-targetLab[y][1])*.38,(targetLab[x][2]-targetLab[y][2])*.38],.30+.70*Math.min(Math.hypot(targetLab[x][0]-targetLab[y][0],(targetLab[x][1]-targetLab[y][1])*.38,(targetLab[x][2]-targetLab[y][2])*.38)/24,1)];before+=edgeCost(e,result);let tmp=result[x];if(x===a)tmp=pb;else if(x===b)tmp=pa;let tmp2=result[y];if(y===a)tmp2=pb;else if(y===b)tmp2=pa;let p1=photoTrans[tmp],p2=photoTrans[tmp2],d=e[2],xx=d[0]-(p1[0]-p2[0]),yy=d[1]-(p1[1]-p2[1]),zz=d[2]-(p1[2]-p2[2]);after+=(xx*xx+yy*yy+zz*zz)*e[3];}
+   if(delta+.20*(after-before)<-1e-6){result[a]=pb;result[b]=pa;}
+   if(step%600===0){setProgress('makeProgress',65+step/attempts*35);$('makeStatus').textContent=`隣接関係を調整中 ${step.toLocaleString()}/${attempts.toLocaleString()}`;await yieldUI();}
+  }
+  assignments=Array.from(result,i=>photos[i].id);previewReady=false;$('previewStatus').textContent='配置が更新されました。プレビューを作り直してください。';
+  await metaPut('assignments',assignments);await metaPut('grid',{cols,rows,tileW,tileH,physicalRatio});$('makeStatus').textContent=`完了：${N.toLocaleString()}マスに重複なしで配置しました。Lab色差・輪郭・隣接関係を考慮しています。`;setProgress('makeProgress',100);await refreshStats();
+ }catch(e){alert('配置中にエラーが発生しました：'+(e.message||String(e)));$('makeStatus').textContent='配置に失敗しました。';}
+ busy=false;$('makeMosaic').disabled=false;
+};
 async function renderMosaicPreview(){
  if(previewBusy)return;
  if(!assignments.length){alert('先に写真を自動配置してください。');return;}
  previewBusy=true;previewReady=false;const btn=$('renderPreview');btn.disabled=true;
  try{
   photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p]));const grid=await metaGet('grid')||{cols:60,rows:50};
-  const cols=grid.cols||60,rows=grid.rows||50,N=cols*rows,tile=Math.max(4,Math.min(32,Number($('previewTileSize').value)||16));
-  const canvas=$('mosaicPreview'),ctx=canvas.getContext('2d');canvas.width=cols*tile;canvas.height=rows*tile;ctx.fillStyle='#e2e8f0';ctx.fillRect(0,0,canvas.width,canvas.height);
+  const cols=grid.cols||60,rows=grid.rows||50,N=cols*rows,tile=Math.max(4,Math.min(32,Number($('previewTileSize').value)||16)),tileH=tile*((grid.tileH||26.7)/(grid.tileW||38.1));
+  const canvas=$('mosaicPreview'),ctx=canvas.getContext('2d');canvas.width=cols*tile;canvas.height=Math.max(1,Math.round(rows*tileH));ctx.fillStyle='#e2e8f0';ctx.fillRect(0,0,canvas.width,canvas.height);
   $('previewCount').textContent=`${assignments.length.toLocaleString()} / ${N.toLocaleString()} マス`;setProgress('previewProgress',0);let missing=0;
   for(let i=0;i<assignments.length;i++){
    const photo=byId.get(assignments[i]);if(!photo){missing++;continue;}let bmp=null;
-   try{bmp=await createImageBitmap(photo.thumb||photo.blob);ctx.drawImage(bmp,(i%cols)*tile,Math.floor(i/cols)*tile,tile,tile);}catch(e){missing++;}finally{if(bmp)bmp.close();}
+   try{bmp=await createImageBitmap(photo.thumb||photo.blob);const [cx,cy,cw,ch]=tileCropRect(bmp.width,bmp.height,(grid.tileW||38.1)/(grid.tileH||26.7));ctx.drawImage(bmp,cx,cy,cw,ch,(i%cols)*tile,Math.floor(i/cols)*tileH,tile,tileH);}catch(e){missing++;}finally{if(bmp)bmp.close();}
    if(i%30===0){setProgress('previewProgress',(i+1)/assignments.length*100);$('previewStatus').textContent=`プレビュー作成中 ${i+1} / ${assignments.length} 枚`;await new Promise(r=>setTimeout(r,0));}
   }
   setProgress('previewProgress',100);previewReady=true;$('previewStatus').textContent=missing?`表示完了。ただし ${missing} 枚の画像を読み込めませんでした。`:`表示完了：${assignments.length.toLocaleString()}枚を配置順に表示しています。`;
