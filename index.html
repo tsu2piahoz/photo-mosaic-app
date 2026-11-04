@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#172033"><meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<title>フォトモザイク制作室</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif;color:#172033;background:#f4f6fa}
+*{box-sizing:border-box}body{margin:0}header{background:#172033;color:white;padding:18px max(16px,env(safe-area-inset-left));position:sticky;top:0;z-index:5}
+h1{font-size:20px;margin:0}header small{color:#cbd5e1}.wrap{max-width:1100px;margin:auto;padding:16px}.tabs{display:flex;gap:8px;overflow:auto;margin:0 0 16px}.tab,button,.filebtn{border:0;border-radius:11px;padding:12px 15px;font-weight:650;background:#e2e8f0;color:#172033;cursor:pointer;white-space:nowrap}.tab.active,button.primary{background:#2457d6;color:white}.panel{background:white;border-radius:16px;padding:16px;margin-bottom:14px;box-shadow:0 2px 12px #14213d0b}.panel h2{font-size:17px;margin:0 0 12px}.muted{color:#64748b;font-size:13px;line-height:1.55}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.stat{background:#f1f5f9;border-radius:12px;padding:12px}.stat b{display:block;font-size:21px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.actions>*{flex:1}.hidden{display:none!important}input[type=file]{display:none}input[type=number]{width:90px;padding:9px;border:1px solid #cbd5e1;border-radius:8px}.progress{height:9px;background:#e2e8f0;border-radius:20px;overflow:hidden;margin:10px 0}.progress span{display:block;height:100%;background:#2457d6;width:0}.thumbgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:6px}.thumbgrid img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:7px;background:#e2e8f0}.canvaswrap{overflow:auto;border:1px solid #cbd5e1;border-radius:10px;background:#e9edf5;max-height:65vh;text-align:center}.canvaswrap canvas{max-width:100%;height:auto;display:block;margin:auto}.notice{background:#eff6ff;border-left:4px solid #2457d6;padding:11px;border-radius:8px;font-size:13px;line-height:1.5}.warn{background:#fff7ed;border-left-color:#ea580c}.row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}label{font-size:14px}.small{font-size:12px;color:#64748b}button:disabled{opacity:.45;cursor:not-allowed}
+@media(min-width:760px){.wrap{padding:24px}.panel{padding:20px}}
+</style></head>
+<body>
+<header><h1>フォトモザイク制作室</h1><small>iPadローカル版｜60列 × 50行・3,000マス</small></header>
+<main class="wrap">
+<nav class="tabs">
+<button class="tab active" data-tab="home">概要</button><button class="tab" data-tab="photos">写真管理</button><button class="tab" data-tab="design">配置設計</button><button class="tab" data-tab="output">設計図・出力</button>
+</nav>
+<section id="home" class="view">
+<div class="panel"><h2>制作プロジェクト</h2><div class="stats">
+<div class="stat"><span class="muted">写真登録数</span><b id="count">0</b><span class="small">枚</span></div>
+<div class="stat"><span class="muted">配置済み</span><b id="placed">0</b><span class="small">マス</span></div>
+<div class="stat"><span class="muted">全マス</span><b>3,000</b><span class="small">マス</span></div>
+</div><div class="actions"><button class="primary" onclick="showTab('photos')">写真を取り込む</button><button onclick="showTab('design')">配置を作成</button></div></div>
+<div class="panel"><h2>確定している寸法</h2><p>横60列 × 縦50行／タイル横38.1mm × 縦26.7mm</p><p><b>タイル部分の合計：約2,286 × 1,335mm</b></p><p class="muted">外周余白・タイル間隔は含みません。寸法は出力画面で変更できます。</p></div>
+<div class="panel"><h2>使い方</h2><ol class="muted"><li>「写真管理」でZIPまたはファイルアプリから写真を登録。</li><li>「配置設計」で原画を読み込み、自動配置を実行。</li><li>「設計図・出力」で番号付き配置図や写真対応表を出力。</li></ol></div>
+<div class="notice">データはこのブラウザ内に保存されます。Safariの履歴・Webサイトデータを消去すると失われる場合があるため、定期的にプロジェクトを書き出してください。</div>
+</section>
+<section id="photos" class="view hidden">
+<div class="panel"><h2>写真を追加</h2><p class="muted">JPEG・PNG・WebPなどの画像に対応。ZIPは画像ファイルを含む通常のZIP形式を選択してください。</p>
+<div class="actions"><label class="filebtn primary" for="zipInput">ZIPから追加</label><input id="zipInput" type="file" accept=".zip,application/zip"><label class="filebtn" for="filesInput">ファイルから追加</label><input id="filesInput" type="file" accept="image/*" multiple></div>
+<div class="progress"><span id="importProgress"></span></div><div id="importStatus" class="muted">まだ写真は登録されていません。</div></div>
+<div class="panel"><div class="row"><h2>登録済み写真</h2><button id="clearPhotos" class="small">写真を全削除</button></div><div id="photoGrid" class="thumbgrid"></div></div>
+</section>
+<section id="design" class="view hidden">
+<div class="panel"><h2>元画像</h2><p class="muted">モザイク全体の元になる画像を選択します。画像は端末内で処理されます。</p><label class="filebtn" for="sourceInput">原画を選択</label><input id="sourceInput" type="file" accept="image/*"><p id="sourceStatus" class="muted">原画未選択</p><div class="canvaswrap"><canvas id="preview" width="600" height="333"></canvas></div></div>
+<div class="panel"><h2>配置条件</h2><div class="row"><label>列数 <input id="cols" type="number" min="1" max="120" value="60"></label><label>行数 <input id="rows" type="number" min="1" max="120" value="50"></label></div><p class="muted">タイル横38.1mm・縦26.7mm。自動配置は写真を重複させず、色補正・半透明合成を行いません。</p><button id="makeMosaic" class="primary" style="width:100%">写真を自動配置</button><div class="progress"><span id="makeProgress"></span></div><p id="makeStatus" class="muted">写真を登録し、原画を選択すると配置できます。</p></div>
+</section>
+<section id="output" class="view hidden">
+<div class="panel"><h2>実寸・印刷設定</h2><div class="row"><label>タイル横(mm) <input id="tileW" type="number" step="0.1" value="38.1"></label><label>タイル縦(mm) <input id="tileH" type="number" step="0.1" value="26.7"></label></div><div class="row" style="margin-top:10px"><label>タイル間隔(mm) <input id="gap" type="number" step="0.1" value="0"></label><label>外周余白(mm) <input id="margin" type="number" step="1" value="0"></label></div><p id="dimensionText" class="muted">完成寸法を計算します。</p><button id="updateDims">寸法を計算</button></div>
+<div class="panel"><h2>設計図・データ出力</h2><p class="muted">Safariの共有・プリント画面からPDF保存できます。大きな原寸図は分割印刷を想定しています。</p><div class="actions"><button class="primary" id="printMap">番号付き配置図を印刷</button><button id="exportCsv">写真対応表CSV</button></div><div class="actions"><button id="exportProject">プロジェクトをバックアップ</button><label class="filebtn" for="projectInput">バックアップを復元</label><input id="projectInput" type="file" accept=".json,application/json"></div></div>
+<div class="panel"><h2>制作データ</h2><p id="outputStatus" class="muted">配置データがありません。</p></div>
+</section>
+</main>
+<script src="vendor/fflate.js"></script><script src="app.js"></script>
+</body></html>
