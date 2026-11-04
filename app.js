@@ -124,3 +124,53 @@ $('projectInput').onchange=async e=>{let f=e.target.files[0];if(!f)return;try{le
 $('printMap').onclick=async()=>{photos=await allPhotos();if(!assignments.length){alert('先に配置を作成してください');return;}let grid=await metaGet('grid')||{cols:60,rows:50},map=new Map(photos.map(p=>[p.id,p]));let win=window.open('','_blank');if(!win){alert('ポップアップを許可してください');return;}let cells=assignments.map((id,i)=>{let p=map.get(id);return `<div class=\"cell\"><b>${Math.floor(i/grid.cols)+1}-${i%grid.cols+1}</b><span>${(p?.name||'').replace(/[&<>\"']/g,'')}</span></div>`}).join('');win.document.write(`<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\"><title>番号付き配置図</title><style>@page{size:A3 landscape;margin:8mm}body{font-family:sans-serif;margin:0}h1{font-size:16px}.grid{display:grid;grid-template-columns:repeat(${grid.cols},1fr);gap:1px}.cell{border:.3px solid #777;min-width:0;height:10mm;overflow:hidden;font-size:5pt;display:flex;flex-direction:column;justify-content:center;align-items:center}.cell b{font-size:6pt}.cell span{max-width:100%;overflow:hidden;white-space:nowrap}@media print{button{display:none}}</style><h1>フォトモザイク配置図｜${grid.cols}列 × ${grid.rows}行</h1><div class=\"grid\">${cells}</div><script>window.onload=()=>setTimeout(()=>window.print(),500)<\\/script></html>`);win.document.close();};
 (async()=>{try{db=await openDB();let s=await metaGet('source');if(s){sourceBlob=s.blob;sourceName=s.name;$('sourceStatus').textContent=`原画：${s.name}`;}assignments=await metaGet('assignments')||[];let g=await metaGet('grid');if(g){$('cols').value=g.cols;$('rows').value=g.rows;}await refreshStats();updateDims();}catch(e){alert('ローカル保存を開始できません。Safariのプライベートブラウズではなく通常モードで開いてください。');}})();
 if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
+
+
+// v4: print physical photo sheets on A4/A3 paper.
+function getPrintLayout(){
+ const paper=$('printPaper').value,w=Number($('printTileW').value),h=Number($('printTileH').value),gap=Number($('printGap').value),margin=Number($('printMargin').value);
+ if(![w,h,gap,margin].every(Number.isFinite)||w<=0||h<=0||gap<0||margin<0)throw Error('印刷寸法は正の数（間隔・余白は0以上）で入力してください。');
+ // Portrait page dimensions in mm. Header reserves 10 mm.
+ const pageW=paper==='A3'?297:210,pageH=paper==='A3'?420:297,usableW=pageW-2*margin,usableH=pageH-2*margin-10;
+ const cols=Math.floor((usableW+gap)/(w+gap)),rows=Math.floor((usableH+gap)/(h+gap));
+ if(cols<1||rows<1)throw Error('このタイル寸法では用紙に配置できません。余白や間隔を小さくしてください。');
+ return {paper,w,h,gap,margin,cols,rows,perPage:cols*rows,pageW,pageH};
+}
+function updatePrintSheetInfo(){
+ try{const x=getPrintLayout(),n=assignments.length,pages=Math.ceil(n/x.perPage);$('printSheetInfo').textContent=`${x.paper}縦／${x.cols}列 × ${x.rows}行＝1ページ${x.perPage}枚。配置${n.toLocaleString()}枚の場合、約${pages.toLocaleString()}ページです。写真は${x.w}×${x.h}mmで配置します。`;}
+ catch(e){$('printSheetInfo').textContent=e.message;}
+}
+['printPaper','printTileW','printTileH','printGap','printMargin'].forEach(id=>$(id).addEventListener('change',updatePrintSheetInfo));
+$('printPhotoSheets').onclick=async()=>{
+ if(busy||previewBusy){alert('ほかの処理が終わってから実行してください。');return;}
+ if(!assignments.length){alert('先に写真を自動配置してください。');return;}
+ let layout;try{layout=getPrintLayout();}catch(e){alert(e.message);return;}
+ const btn=$('printPhotoSheets');btn.disabled=true;$('printSheetStatus').textContent='写真データを準備しています…';
+ try{
+  photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p]));
+  const missing=assignments.filter(id=>!byId.has(id)).length;if(missing)throw Error(`${missing}枚の写真データが見つかりません。写真を再登録してください。`);
+  const gridMeta=await metaGet('grid')||{cols:60,rows:50};const gridCols=gridMeta.cols||60;const pages=Math.ceil(assignments.length/layout.perPage),urls=[];
+  // Create object URLs once; the print window uses them without embedding photo bytes in HTML.
+  for(const p of photos)urls.push([p.id,URL.createObjectURL(p.blob)]);
+  const urlMap=new Map(urls);const win=window.open('','_blank');
+  if(!win){urls.forEach(x=>URL.revokeObjectURL(x[1]));throw Error('ポップアップを許可してから、もう一度実行してください。');}
+  const safe=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let html=`<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>フォトモザイク写真シート</title><style>
+   @page{size:${layout.paper} portrait;margin:${layout.margin}mm}*{box-sizing:border-box}body{font-family:Arial,"Noto Sans JP",sans-serif;margin:0;color:#111}.page{width:100%;height:${layout.pageH-2*layout.margin}mm;page-break-after:always;break-after:page;overflow:hidden}.page:last-child{page-break-after:auto;break-after:auto}.head{height:10mm;font-size:9pt;display:flex;justify-content:space-between;align-items:flex-start}.grid{display:grid;grid-template-columns:repeat(${layout.cols},${layout.w}mm);grid-auto-rows:${layout.h+3+layout.gap}mm;column-gap:${layout.gap}mm;row-gap:${layout.gap}mm;justify-content:center;align-content:start}.cell{width:${layout.w}mm;height:${layout.h+3}mm;overflow:hidden}.num{height:3mm;line-height:3mm;font-size:6pt;text-align:center;color:#111}.cell img{display:block;width:${layout.w}mm;height:${layout.h}mm;object-fit:cover;border:.15mm solid #777}.hint{font-size:7pt;color:#555}@media screen{body{background:#ddd}.page{background:white;margin:12px auto;padding:0;box-shadow:0 1px 8px #999;width:${layout.pageW-2*layout.margin}mm;min-height:${layout.pageH-2*layout.margin}mm;height:auto;padding-bottom:4mm}.grid{justify-content:center}}
+   </style></head><body>`;
+  for(let pg=0;pg<pages;pg++){
+   const start=pg*layout.perPage,end=Math.min(assignments.length,start+layout.perPage);
+   html+=`<section class="page"><div class="head"><b>フォトモザイク写真シート｜${layout.paper}｜${pg+1}/${pages}ページ</b><span class="hint">番号は配置図と対応／倍率100%で印刷</span></div><div class="grid">`;
+   for(let i=start;i<end;i++){
+    const id=assignments[i],p=byId.get(id),url=urlMap.get(id);
+    html+=`<div class="cell"><div class="num">${i+1}（${Math.floor(i/gridCols)+1}-${i%gridCols+1}）</div><img src="${url}" alt="${safe(p.name)}"></div>`;
+   }
+   html+='</div></section>';
+  }
+  html+=`<script>window.addEventListener('load',()=>{const imgs=[...document.images];Promise.all(imgs.map(i=>i.decode?i.decode().catch(()=>{}):new Promise(r=>{i.onload=i.onerror=r}))).then(()=>setTimeout(()=>window.print(),700));});window.addEventListener('afterprint',()=>{document.title='印刷完了：フォトモザイク写真シート';});<\/script></body></html>`;
+  win.document.open();win.document.write(html);win.document.close();
+  $('printSheetStatus').textContent=`印刷画面を準備しました。${pages}ページ／${assignments.length.toLocaleString()}枚。写真の読み込み完了後に印刷画面が開きます。`;
+  // Keep URLs alive while the print tab is open; release when it closes is not observable cross-browser.
+ }catch(e){$('printSheetStatus').textContent='印刷準備に失敗しました：'+e.message;alert('印刷準備に失敗しました：'+e.message);}
+ finally{btn.disabled=false;}
+};
