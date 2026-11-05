@@ -345,45 +345,67 @@ function getPrintLayout(){
  return {paper,w,h,gap,margin,cols,rows,perPage:cols*rows,pageW,pageH};
 }
 function updatePrintSheetInfo(){
- try{const x=getPrintLayout(),n=assignments.length,pages=Math.ceil(n/x.perPage),batch=+$('printBatchSize').value||5,start=+$('printStartPage').value||1,end=Math.min(pages,start+batch-1);$('printSheetInfo').textContent=`${x.paper}縦／${x.cols}列 × ${x.rows}行＝1ページ${x.perPage}枚。全${pages.toLocaleString()}ページ。今回の出力範囲：${start}〜${Math.max(start,end)}ページ（最大${batch}ページ）。写真は${x.w}×${x.h}mm、写真への番号印刷なし。`; $('printStartPage').max=Math.max(1,pages);}
+ try{const x=getPrintLayout(),n=assignments.length,pages=Math.ceil(n/x.perPage),batch=+$('printBatchSize').value||5,start=+$('printStartPage').value||1,end=Math.min(pages,start+batch-1);$('printSheetInfo').textContent=`${x.paper}縦／${x.cols}列 × ${x.rows}行＝1用紙${x.perPage}枚。全${pages.toLocaleString()}用紙。今回：${start}〜${Math.max(start,end)}用紙（最大${batch}用紙）。表面は写真のみ、裏面は番号・座標です。`; $('printStartPage').max=Math.max(1,pages);}
  catch(e){$('printSheetInfo').textContent=e.message;}
 }
-['printPaper','printTileW','printTileH','printGap','printMargin','printBatchSize','printStartPage'].forEach(id=>$(id).addEventListener('change',updatePrintSheetInfo));
+['printPaper','printTileW','printTileH','printGap','printMargin','printBatchSize','printStartPage','printOutputMode','printDuplexEdge','printBackLabel'].forEach(id=>$(id).addEventListener('change',updatePrintSheetInfo));
+// v9: front/back paired print sheets. Back labels are position-mirrored according to the selected duplex edge.
 $('printPhotoSheets').onclick=async()=>{
  if(busy||previewBusy){alert('ほかの処理が終わってから実行してください。');return;}
  if(!assignments.length){alert('先に写真を自動配置してください。');return;}
  let layout;try{layout=getPrintLayout();}catch(e){alert(e.message);return;}
  const totalPages=Math.ceil(assignments.length/layout.perPage),batch=+$('printBatchSize').value||5,startPage=+$('printStartPage').value||1;
  if(!Number.isInteger(startPage)||startPage<1||startPage>totalPages){alert(`開始ページは1〜${totalPages}の範囲で指定してください。`);return;}
- const endPage=Math.min(totalPages,startPage+batch-1),btn=$('printPhotoSheets');btn.disabled=true;$('printSheetStatus').textContent='写真データを準備しています…';
- let urls=[];
+ const endPage=Math.min(totalPages,startPage+batch-1),btn=$('printPhotoSheets');
+ const mode=$('printOutputMode')?.value||'paired',edge=$('printDuplexEdge')?.value||'long',labelMode=$('printBackLabel')?.value||'both';
+ // Open synchronously from the tap so Safari does not block the print window after async reads.
+ const win=window.open('','_blank');if(!win){alert('ポップアップを許可してから、もう一度実行してください。');return;}
+ let urls=[];win.addEventListener('pagehide',()=>urls.forEach(URL.revokeObjectURL),{once:true});
+ btn.disabled=true;$('printSheetStatus').textContent='写真と番号データを準備しています…';
  try{
   photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p]));
   const missing=assignments.filter(id=>!byId.has(id)).length;if(missing)throw Error(`${missing}枚の写真データが見つかりません。写真を再登録してください。`);
   const gridMeta=await metaGet('grid')||{cols:60,rows:50},gridCols=gridMeta.cols||60;
-  // Create object URLs only for the requested batch to limit memory on iPad.
   const first=(startPage-1)*layout.perPage,last=Math.min(assignments.length,endPage*layout.perPage);
   const batchPhotos=assignments.slice(first,last).map(id=>byId.get(id));
-  const urlMap=new Map();for(const p of batchPhotos){if(!urlMap.has(p.id)){const u=URL.createObjectURL(p.blob);urls.push(u);urlMap.set(p.id,u);}}
-  const win=window.open('','_blank');if(!win)throw Error('ポップアップを許可してから、もう一度実行してください。');
+  const urlMap=new Map();
+  if(mode!=='back')for(const p of batchPhotos){if(!urlMap.has(p.id)){const u=URL.createObjectURL(p.blob);urls.push(u);urlMap.set(p.id,u);}}
   const safe=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  let html=`<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>フォトモザイク写真シート ${startPage}-${endPage}ページ</title><style>
-   @page{size:${layout.paper} portrait;margin:${layout.margin}mm}*{box-sizing:border-box}body{font-family:Arial,"Noto Sans JP",sans-serif;margin:0;color:#111}.page{width:100%;height:${layout.pageH-2*layout.margin}mm;page-break-after:always;break-after:page;overflow:hidden}.page:last-child{page-break-after:auto;break-after:auto}.head{height:10mm;font-size:9pt;display:flex;justify-content:space-between;align-items:flex-start}.grid{display:grid;grid-template-columns:repeat(${layout.cols},${layout.w}mm);grid-auto-rows:${layout.h}mm;column-gap:${layout.gap}mm;row-gap:${layout.gap}mm;justify-content:center;align-content:start}.cell{width:${layout.w}mm;height:${layout.h}mm;overflow:hidden}.cell img{display:block;width:${layout.w}mm;height:${layout.h}mm;object-fit:cover;border:0}.hint{font-size:7pt;color:#555}@media screen{body{background:#ddd}.page{background:white;margin:12px auto;padding:0;box-shadow:0 1px 8px #999;width:${layout.pageW-2*layout.margin}mm;min-height:${layout.pageH-2*layout.margin}mm;height:auto;padding-bottom:4mm}.grid{justify-content:center}}
+  const pageHeight=layout.pageH-2*layout.margin,gridHeight=pageHeight-10;
+  let html=`<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>フォトモザイク表裏印刷 ${startPage}-${endPage}</title><style>
+   @page{size:${layout.paper} portrait;margin:${layout.margin}mm}*{box-sizing:border-box}body{font-family:Arial,"Noto Sans JP",sans-serif;margin:0;color:#111}.page{width:100%;height:${pageHeight}mm;page-break-after:always;break-after:page;overflow:hidden}.page:last-child{page-break-after:auto;break-after:auto}.head{height:10mm;font-size:9pt;display:flex;justify-content:space-between;align-items:flex-start}.grid{display:grid;grid-template-columns:repeat(${layout.cols},${layout.w}mm);grid-auto-rows:${layout.h}mm;column-gap:${layout.gap}mm;row-gap:${layout.gap}mm;justify-content:center;align-content:start}.cell{width:${layout.w}mm;height:${layout.h}mm;overflow:hidden;display:flex;align-items:center;justify-content:center}.cell img{display:block;width:${layout.w}mm;height:${layout.h}mm;object-fit:cover;border:0}.backcell{border:.18mm solid #9aa6b5;flex-direction:column;gap:.4mm;text-align:center}.backnum{font-family:Arial,sans-serif;font-size:${Math.max(7,Math.min(12,layout.w*.28))}pt;font-weight:800;line-height:1}.backcoord{font-family:Arial,sans-serif;font-size:${Math.max(4.5,Math.min(7,layout.w*.15))}pt;line-height:1.05;color:#333}.blank{border:0}@media screen{body{background:#e8edf4}.page{background:white;margin:12px auto;padding:0;box-shadow:0 1px 8px #64748b55;width:${layout.pageW-2*layout.margin}mm;min-height:${layout.pageH-2*layout.margin}mm;height:auto;padding-bottom:4mm}.grid{justify-content:center}}
    </style></head><body>`;
-  for(let pg=startPage-1;pg<endPage;pg++){
-   const from=pg*layout.perPage,to=Math.min(assignments.length,from+layout.perPage);
-   html+=`<section class="page"><div class="head"><b>フォトモザイク写真シート｜${layout.paper}｜全${totalPages}ページ中 ${pg+1}ページ</b><span class="hint">写真番号なし／倍率100%で印刷</span></div><div class="grid">`;
-   for(let i=Math.max(first,from);i<to;i++){const p=byId.get(assignments[i]);html+=`<div class="cell"><img src="${urlMap.get(p.id)}" alt="${safe(p.name)}"></div>`;}
-   html+='</div></section>';
+  const pageNums=Array.from({length:endPage-startPage+1},(_,k)=>startPage-1+k);
+  function pageHeader(pg,side){return `<div class="head"><b>フォトモザイク｜${side==='front'?'写真表面':'写真裏面・配置番号'}｜${layout.paper}｜用紙 ${pg+1}/${totalPages}</b><span>${side==='front'?'写真のみ・番号なし':edge==='long'?'長辺とじ用':'短辺とじ用'}</span></div>`;}
+  function frontPage(pg){
+   const from=pg*layout.perPage,to=Math.min(assignments.length,from+layout.perPage);let out=`<section class="page">${pageHeader(pg,'front')}<div class="grid">`;
+   for(let i=from;i<from+layout.perPage;i++){
+    if(i<to){const ph=byId.get(assignments[i]);out+=`<div class="cell"><img src="${urlMap.get(ph.id)}" alt="${safe(ph.name)}"></div>`;}else out+='<div class="cell blank"></div>';
+   }
+   return out+'</div></section>';
   }
+  function backPage(pg){
+   const from=pg*layout.perPage,to=Math.min(assignments.length,from+layout.perPage);let out=`<section class="page">${pageHeader(pg,'back')}<div class="grid">`;
+   for(let r=0;r<layout.rows;r++)for(let c=0;c<layout.cols;c++){
+    let rr=r,cc=c;if(edge==='long')cc=layout.cols-1-c;else if(edge==='short')rr=layout.rows-1-r;
+    const local=rr*layout.cols+cc,i=from+local;
+    if(i<to){const row=Math.floor(i/gridCols)+1,col=(i%gridCols)+1,parts=[];
+     if(labelMode!=='coord')parts.push(`<b class="backnum">${String(i+1).padStart(4,'0')}</b>`);
+     if(labelMode!=='number')parts.push(`<small class="backcoord">${row}行・${col}列</small>`);
+     out+=`<div class="cell backcell">${parts.join('')}</div>`;
+    }else out+='<div class="cell blank"></div>';
+   }
+   return out+'</div></section>';
+  }
+  for(const pg of pageNums){if(mode==='paired'){html+=frontPage(pg)+backPage(pg);}else if(mode==='front')html+=frontPage(pg);else html+=backPage(pg);}
   html+=`<script>window.addEventListener('load',()=>{const imgs=[...document.images];Promise.all(imgs.map(i=>i.decode?i.decode().catch(()=>{}):new Promise(r=>{i.onload=i.onerror=r}))).then(()=>setTimeout(()=>window.print(),500));});<\/script></body></html>`;
   win.document.open();win.document.write(html);win.document.close();
-  $('printSheetStatus').textContent=`印刷画面を準備しました。${startPage}〜${endPage}ページ／全${totalPages}ページ。写真は番号なし・実寸${layout.w}×${layout.h}mmです。PDF保存後は開始ページを${Math.min(totalPages,endPage+1)}にして続けられます。`;
+  const sides=mode==='paired'?'表面・裏面を交互に出力':mode==='front'?'表面のみ':'裏面のみ';
+  $('printSheetStatus').textContent=`印刷データを準備しました。${startPage}〜${endPage}用紙／全${totalPages}用紙。${sides}。裏面番号は通し番号と座標を割り当てています。`;
   $('printStartPage').value=Math.min(totalPages,endPage+1);updatePrintSheetInfo();
- }catch(e){urls.forEach(URL.revokeObjectURL);$('printSheetStatus').textContent='印刷準備に失敗しました：'+e.message;alert('印刷準備に失敗しました：'+e.message);}
+ }catch(e){urls.forEach(URL.revokeObjectURL);win.close();$('printSheetStatus').textContent='印刷準備に失敗しました：'+e.message;alert('印刷準備に失敗しました：'+e.message);}
  finally{btn.disabled=false;}
 };
-
 // Crop preview: inspect the actual tile aspect ratio in small pages to avoid loading thousands at once.
 let cropPreviewUrls=[];
 async function renderCropPreview(){
