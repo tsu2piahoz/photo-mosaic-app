@@ -8,7 +8,7 @@ function putPhoto(p){return new Promise((res,rej)=>{let r=tx(STORE,'readwrite').
 function clearStore(){return new Promise((res,rej)=>{let r=tx(STORE,'readwrite').clear();r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
 function metaPut(key,value){return new Promise((res,rej)=>{let r=tx(META,'readwrite').put({key,value});r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
 function metaGet(key){return new Promise(res=>{let r=tx(META).get(key);r.onsuccess=()=>res(r.result?.value);r.onerror=()=>res(null);});}
-function showTab(name){document.querySelectorAll('.view').forEach(x=>x.classList.toggle('hidden',x.id!==name));document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(name==='photos')renderPhotos();if(name==='home')refreshStats();if(name==='output')updateDims();}
+function showTab(name){document.querySelectorAll('.view').forEach(x=>x.classList.toggle('hidden',x.id!==name));document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(name==='photos'){renderPhotos();refreshStats();}if(name==='output')updateDims();if(name==='quality')initCropPreview();}
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
 async function refreshStats(){photos=await allPhotos();$('count').textContent=photos.length.toLocaleString();$('placed').textContent=assignments.length.toLocaleString();$('outputStatus').textContent=assignments.length?`${assignments.length.toLocaleString()}マスに配置済み`:'配置データがありません。';}
 function blobURL(blob){return URL.createObjectURL(blob)}
@@ -136,6 +136,33 @@ $('printMap').onclick=async()=>{
  html+=`<script>window.onload=()=>setTimeout(()=>window.print(),500)<\/script></body></html>`;
  win.document.open();win.document.write(html);win.document.close();
 };
+
+
+// v6: visual quality diagnostics. This is a heuristic guide, not a perceptual certification.
+async function runQualityCheck(){
+ if(busy||previewBusy){alert('ほかの処理が終わってから実行してください。');return;}
+ if(!assignments.length){alert('先にモザイクを作成してください。');return;}
+ const src=await getSource();if(!src){alert('原画が見つかりません。原画を再選択してください。');return;}
+ const btn=$('runQuality');btn.disabled=true;$('qualityResult').textContent='原画と配置写真を比較しています…';$('qualityMetrics').classList.add('hidden');$('qualityAdvice').textContent='';
+ try{
+  const grid=await metaGet('grid')||{cols:60,rows:50,tileW:38.1,tileH:26.7},cols=grid.cols||60,rows=grid.rows||50,N=cols*rows;
+  if(assignments.length!==N)throw Error(`配置数が不足しています（${assignments.length}/${N}）。`);
+  photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p]));const missing=assignments.filter(id=>!byId.has(id)).length;if(missing)throw Error(`${missing}枚の写真データが見つかりません。写真を再登録してください。`);
+  const aspect=(grid.tileW||38.1)/(grid.tileH||26.7),physicalRatio=(cols*(grid.tileW||38.1))/(rows*(grid.tileH||26.7));
+  const source=await createImageBitmap(src),crop=tileCropRect(source.width,source.height,physicalRatio),c=document.createElement('canvas');c.width=cols*8;c.height=rows*8;const ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(source,crop[0],crop[1],crop[2],crop[3],0,0,c.width,c.height);source.close();
+  const data=ctx.getImageData(0,0,c.width,c.height).data;let sumDelta=0,sumDetail=0,sumTargetDetail=0,sumPhotoDetail=0,done=0;
+  for(let i=0;i<N;i++){const r=Math.floor(i/cols),col=i%cols;let sr=0,sg=0,sb=0,sl=0,sl2=0;for(let yy=0;yy<8;yy++)for(let xx=0;xx<8;xx++){const k=(((r*8+yy)*c.width)+(col*8+xx))*4,R=data[k],G=data[k+1],B=data[k+2],L=.2126*R+.7152*G+.0722*B;sr+=R;sg+=G;sb+=B;sl+=L;sl2+=L*L;}const meanL=sl/64,targetLab=rgbToLab([sr/64,sg/64,sb/64]),targetStd=Math.sqrt(Math.max(0,sl2/64-meanL*meanL)),p=byId.get(assignments[i]),feat=await imageFeatures(p.thumb||p.blob,aspect),dL=targetLab[0]-feat.lab[0],da=targetLab[1]-feat.lab[1],dbb=targetLab[2]-feat.lab[2];sumDelta+=Math.sqrt(dL*dL+da*da+dbb*dbb);sumDetail+=Math.abs(targetStd-feat.std);sumTargetDetail+=targetStd;sumPhotoDetail+=feat.std;done++;if(i%24===0){$('qualityResult').textContent=`比較中 ${i+1}/${N} 枚`;await yieldUI();}}
+  const avgDelta=sumDelta/done,avgDetail=sumDetail/done,meanTarget=sumTargetDetail/done,meanPhoto=sumPhotoDetail/done,score=Math.max(0,Math.min(100,100-avgDelta*1.65-avgDetail*.28));let grade,advice;
+  if(avgDelta<13&&avgDetail<24){grade='良好';advice='原画の色と明暗の特徴を比較的よく再現できています。プレビューを拡大・縮小して見え方を確認してください。';}
+  else if(avgDelta<21&&avgDetail<38){grade='標準';advice='全体像は再現できていますが、一部の色や明暗に差が残っています。原画の重要部分が読み取れるか、少し離れて確認してください。';}
+  else{grade='改善の余地あり';advice='原画との色・明暗の差が比較的大きい結果です。写真候補を追加すると、より近い特徴を持つ写真を選べる可能性があります。まず300〜600枚程度を追加候補として検討してください。';}
+  if(photos.length>done&&avgDelta>=21)advice+=' 未使用写真がある場合は、追加前に再生成して比較する方法もあります。';
+  $('qualityResult').innerHTML=`<div class="quality-grade">${grade}</div><div>評価スコアの目安：<b>${score.toFixed(1)} / 100</b></div><div class="small">平均色差 ΔE76：${avgDelta.toFixed(1)}｜明暗特徴の平均差：${avgDetail.toFixed(1)}</div>`;$('qDelta').textContent=avgDelta.toFixed(1);$('qDetail').textContent=avgDetail.toFixed(1);$('qScore').textContent=score.toFixed(1)+' / 100';$('qualityMetrics').classList.remove('hidden');$('qualityAdvice').textContent=advice+`（原画側の明暗ばらつき平均 ${meanTarget.toFixed(1)}／写真側 ${meanPhoto.toFixed(1)}）`;
+  await metaPut('qualityReport',{avgDelta,avgDetail,score,grade,createdAt:new Date().toISOString(),photoCount:photos.length,placedCount:done});
+ }catch(e){$('qualityResult').textContent='評価できませんでした：'+(e.message||String(e));}finally{btn.disabled=false;}
+}
+$('runQuality').onclick=runQualityCheck;
+
 (async()=>{try{db=await openDB();let s=await metaGet('source');if(s){sourceBlob=s.blob;sourceName=s.name;$('sourceStatus').textContent=`原画：${s.name}`;}assignments=await metaGet('assignments')||[];let g=await metaGet('grid');if(g){$('cols').value=g.cols;$('rows').value=g.rows;}await refreshStats();updateDims();}catch(e){alert('ローカル保存を開始できません。Safariのプライベートブラウズではなく通常モードで開いてください。');}})();
 if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
 
