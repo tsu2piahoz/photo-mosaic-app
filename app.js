@@ -290,7 +290,7 @@ $('printMap').onclick=async()=>{
 };
 
 
-// v7: spatial-feature matching. Quality diagnostics remain heuristic, not a perceptual certification.
+// v8: multi-axis quality diagnostics. Scores are heuristic, not a perceptual certification.
 async function runQualityCheck(){
  if(busy||previewBusy){alert('ほかの処理が終わってから実行してください。');return;}
  if(!assignments.length){alert('先にモザイクを作成してください。');return;}
@@ -302,16 +302,31 @@ async function runQualityCheck(){
   photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p]));const missing=assignments.filter(id=>!byId.has(id)).length;if(missing)throw Error(`${missing}枚の写真データが見つかりません。写真を再登録してください。`);
   const aspect=(grid.tileW||38.1)/(grid.tileH||26.7),physicalRatio=(cols*(grid.tileW||38.1))/(rows*(grid.tileH||26.7));
   const source=await createImageBitmap(src),crop=tileCropRect(source.width,source.height,physicalRatio),c=document.createElement('canvas');c.width=cols*8;c.height=rows*8;const ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(source,crop[0],crop[1],crop[2],crop[3],0,0,c.width,c.height);source.close();
-  const data=ctx.getImageData(0,0,c.width,c.height).data;let sumDelta=0,sumDetail=0,sumTargetDetail=0,sumPhotoDetail=0,done=0;const featureUpdates=[];
-  for(let i=0;i<N;i++){const r=Math.floor(i/cols),col=i%cols;let sr=0,sg=0,sb=0,sl=0,sl2=0;for(let yy=0;yy<8;yy++)for(let xx=0;xx<8;xx++){const k=(((r*8+yy)*c.width)+(col*8+xx))*4,R=data[k],G=data[k+1],B=data[k+2],L=.2126*R+.7152*G+.0722*B;sr+=R;sg+=G;sb+=B;sl+=L;sl2+=L*L;}const meanL=sl/64,targetLab=rgbToLab([sr/64,sg/64,sb/64]),targetStd=Math.sqrt(Math.max(0,sl2/64-meanL*meanL)),p=byId.get(assignments[i]),cached=p.featureVersion===PHOTO_FEATURE_VERSION&&Math.abs((p.featureAspect||0)-aspect)<1e-6&&!!p.feature,feat=await getPhotoFeature(p,aspect),dL=targetLab[0]-feat.lab[0],da=targetLab[1]-feat.lab[1],dbb=targetLab[2]-feat.lab[2];if(!cached)featureUpdates.push(p);if(featureUpdates.length>=50)await putPhotos(featureUpdates.splice(0));sumDelta+=Math.sqrt(dL*dL+da*da+dbb*dbb);sumDetail+=Math.abs(targetStd-feat.std);sumTargetDetail+=targetStd;sumPhotoDetail+=feat.std;done++;if(i%24===0){$('qualityResult').textContent=`比較中 ${i+1}/${N} 枚`;await yieldUI();}}
+  const data=ctx.getImageData(0,0,c.width,c.height).data;let sumDelta=0,sumSpatial=0,sumDetail=0,sumTargetDetail=0,sumPhotoDetail=0,done=0;const featureUpdates=[],placedFeatures=new Array(N),targetMeans=new Array(N);
+  for(let i=0;i<N;i++){
+   const r=Math.floor(i/cols),col=i%cols;let sr=0,sg=0,sb=0,sl=0,sl2=0;const targetCells=[];
+   for(let yy=0;yy<8;yy++)for(let xx=0;xx<8;xx++){const k=(((r*8+yy)*c.width)+(col*8+xx))*4,R=data[k],G=data[k+1],B=data[k+2],L=.2126*R+.7152*G+.0722*B;sr+=R;sg+=G;sb+=B;sl+=L;sl2+=L*L;}
+   for(let sy=0;sy<4;sy++)for(let sx=0;sx<4;sx++){let ar=0,ag=0,ab=0;for(let dy=0;dy<2;dy++)for(let dx=0;dx<2;dx++){const k=(((r*8+sy*2+dy)*c.width)+(col*8+sx*2+dx))*4;ar+=data[k];ag+=data[k+1];ab+=data[k+2];}targetCells.push(rgbToLab([ar/4,ag/4,ab/4]));}
+   const meanL=sl/64,targetLab=rgbToLab([sr/64,sg/64,sb/64]),targetStd=Math.sqrt(Math.max(0,sl2/64-meanL*meanL)),p=byId.get(assignments[i]),cached=p.featureVersion===PHOTO_FEATURE_VERSION&&Math.abs((p.featureAspect||0)-aspect)<1e-6&&!!p.feature,feat=await getPhotoFeature(p,aspect),dL=targetLab[0]-feat.lab[0],da=targetLab[1]-feat.lab[1],dbb=targetLab[2]-feat.lab[2];
+   if(!cached)featureUpdates.push(p);if(featureUpdates.length>=50)await putPhotos(featureUpdates.splice(0));
+   let spatial=0;for(let k=0;k<16;k++){const a=targetCells[k],b=feat.cells[k],x=a[0]-b[0],y=(a[1]-b[1])*.55,z=(a[2]-b[2])*.55;spatial+=Math.sqrt(x*x+y*y+z*z);}spatial/=16;
+   sumDelta+=Math.sqrt(dL*dL+da*da+dbb*dbb);sumSpatial+=spatial;sumDetail+=Math.abs(targetStd-feat.std);sumTargetDetail+=targetStd;sumPhotoDetail+=feat.std;placedFeatures[i]=feat;targetMeans[i]=[targetLab[0],targetLab[1]*.38,targetLab[2]*.38];done++;
+   if(i%24===0){$('qualityResult').textContent=`比較中 ${i+1}/${N} 枚`;await yieldUI();}
+  }
   if(featureUpdates.length)await putPhotos(featureUpdates);
-  const avgDelta=sumDelta/done,avgDetail=sumDetail/done,meanTarget=sumTargetDetail/done,meanPhoto=sumPhotoDetail/done,score=Math.max(0,Math.min(100,100-avgDelta*1.65-avgDetail*.28));let grade,advice;
-  if(avgDelta<13&&avgDetail<24){grade='良好';advice='原画の色と明暗の特徴を比較的よく再現できています。プレビューを拡大・縮小して見え方を確認してください。';}
-  else if(avgDelta<21&&avgDetail<38){grade='標準';advice='全体像は再現できていますが、一部の色や明暗に差が残っています。原画の重要部分が読み取れるか、少し離れて確認してください。';}
-  else{grade='改善の余地あり';advice='原画との色・明暗の差が比較的大きい結果です。写真候補を追加すると、より近い特徴を持つ写真を選べる可能性があります。まず300〜600枚程度を追加候補として検討してください。';}
-  if(photos.length>done&&avgDelta>=21)advice+=' 未使用写真がある場合は、追加前に再生成して比較する方法もあります。';
-  $('qualityResult').innerHTML=`<div class="quality-grade">${grade}</div><div>評価スコアの目安：<b>${score.toFixed(1)} / 100</b></div><div class="small">平均色差 ΔE76：${avgDelta.toFixed(1)}｜明暗特徴の平均差：${avgDetail.toFixed(1)}</div>`;$('qDelta').textContent=avgDelta.toFixed(1);$('qDetail').textContent=avgDetail.toFixed(1);$('qScore').textContent=score.toFixed(1)+' / 100';$('qualityMetrics').classList.remove('hidden');$('qualityAdvice').textContent=advice+`（原画側の明暗ばらつき平均 ${meanTarget.toFixed(1)}／写真側 ${meanPhoto.toFixed(1)}）`;
-  await metaPut('qualityReport',{avgDelta,avgDetail,score,grade,createdAt:new Date().toISOString(),photoCount:photos.length,placedCount:done});
+  // Evaluate whether adjacent tiles preserve the direction and magnitude of the original image's color transitions.
+  let edgeError=0,edgeCount=0;
+  for(let r=0;r<rows;r++)for(let col=0;col<cols;col++){
+   const i=r*cols+col;for(const j of [col+1<cols?i+1:-1,r+1<rows?i+cols:-1])if(j>=0){const ta=targetMeans[i],tb=targetMeans[j],pa=placedFeatures[i].lab,pb=placedFeatures[j].lab;const tx=ta[0]-tb[0],ty=ta[1]-tb[1],tz=ta[2]-tb[2],px=(pa[0]-pb[0]),py=(pa[1]-pb[1])*.38,pz=(pa[2]-pb[2])*.38;edgeError+=Math.hypot(tx-px,ty-py,tz-pz);edgeCount++;}}
+  const avgDelta=sumDelta/done,avgSpatial=sumSpatial/done,avgDetail=sumDetail/done,avgEdge=edgeError/Math.max(1,edgeCount),meanTarget=sumTargetDetail/done,meanPhoto=sumPhotoDetail/done;
+  const score=Math.max(0,Math.min(100,100-avgDelta*.85-avgSpatial*.48-avgDetail*.20-avgEdge*.16));let grade,advice;
+  if(avgDelta<13&&avgSpatial<17&&avgDetail<24&&avgEdge<15){grade='良好';advice='色・タイル内の色分布・隣接部分のつながりを比較的よく再現できています。全体プレビューを少し離れて見て、校舎の輪郭や桜の形も確認してください。';}
+  else if(avgDelta<21&&avgSpatial<27&&avgDetail<38&&avgEdge<25){grade='標準';advice='全体像は再現できていますが、色やタイル内の分布、隣接部分に差が残っています。原画の重要部分が読み取れるか確認してください。';}
+  else{grade='改善の余地あり';advice='色・局所的な色分布・隣接部分のいずれかに比較的大きな差があります。未使用写真がある場合は、写真の種類を増やして再配置すると改善する可能性があります。';}
+  if(photos.length>done&&grade!=='良好')advice+=' 現在の未使用写真も含め、追加写真を登録した後に再配置して比較するのがおすすめです。';
+  $('qualityResult').innerHTML=`<div class="quality-grade">${grade}</div><div>総合評価の目安：<b>${score.toFixed(1)} / 100</b></div><div class="small">平均色差 ΔE76：${avgDelta.toFixed(1)}｜4×4色分布差：${avgSpatial.toFixed(1)}｜明暗差：${avgDetail.toFixed(1)}｜隣接色変化差：${avgEdge.toFixed(1)}</div>`;
+  $('qDelta').textContent=avgDelta.toFixed(1);$('qSpatial').textContent=avgSpatial.toFixed(1);$('qDetail').textContent=avgDetail.toFixed(1);$('qEdge').textContent=avgEdge.toFixed(1);$('qScore').textContent=score.toFixed(1)+' / 100';$('qualityMetrics').classList.remove('hidden');$('qualityAdvice').textContent=advice+`（原画側の明暗ばらつき平均 ${meanTarget.toFixed(1)}／写真側 ${meanPhoto.toFixed(1)}）`;
+  await metaPut('qualityReport',{avgDelta,avgSpatial,avgDetail,avgEdge,score,grade,createdAt:new Date().toISOString(),photoCount:photos.length,placedCount:done});
  }catch(e){$('qualityResult').textContent='評価できませんでした：'+(e.message||String(e));}finally{busy=false;btn.disabled=false;}
 }
 $('runQuality').onclick=runQualityCheck;
