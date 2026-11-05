@@ -6,6 +6,7 @@ function openDB(){return new Promise((resolve,reject)=>{let r=indexedDB.open(DB,
 function tx(store,mode='readonly'){return db.transaction(store,mode).objectStore(store)}
 function allPhotos(){return new Promise((res,rej)=>{let r=tx(STORE).getAll();r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});}
 function putPhoto(p){return new Promise((res,rej)=>{let r=tx(STORE,'readwrite').put(p);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
+function putPhotos(items){return new Promise((res,rej)=>{const t=db.transaction(STORE,'readwrite'),st=t.objectStore(STORE);for(const p of items)st.put(p);t.oncomplete=()=>res();t.onerror=()=>rej(t.error);t.onabort=()=>rej(t.error||new Error('写真データの保存に失敗しました。'));});}
 function clearStore(){return new Promise((res,rej)=>{let r=tx(STORE,'readwrite').clear();r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
 function deletePhoto(id){return new Promise((res,rej)=>{let r=tx(STORE,'readwrite').delete(id);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
 function getPhoto(id){return new Promise((res,rej)=>{let r=tx(STORE).get(id);r.onsuccess=()=>res(r.result||null);r.onerror=()=>rej(r.error);});}
@@ -128,13 +129,27 @@ function rgbToLab(rgb){
  const fx=f(x),fy=f(y),fz=f(z);return [116*fy-16,500*(fx-fy),200*(fy-fz)];
 }
 function tileCropRect(w,h,aspect){let a=w/h;if(a>aspect){let nw=h*aspect;return [(w-nw)/2,0,nw,h];}let nh=w/aspect;return [0,(h-nh)/2,w,nh];}
+const PHOTO_FEATURE_VERSION=2;
 async function imageFeatures(blob,aspect){
- const bmp=await createImageBitmap(blob);const [sx,sy,sw,sh]=tileCropRect(bmp.width,bmp.height,aspect);
- const c=document.createElement('canvas');c.width=32;c.height=32;const ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(bmp,sx,sy,sw,sh,0,0,32,32);bmp.close();
- const d=ctx.getImageData(0,0,32,32).data;let r=0,g=0,b=0,lum=0,lum2=0;
- for(let i=0;i<d.length;i+=4){r+=d[i];g+=d[i+1];b+=d[i+2];const l=.2126*d[i]+.7152*d[i+1]+.0722*d[i+2];lum+=l;lum2+=l*l;}
- const n=1024,mean=lum/n;return {rgb:[r/n,g/n,b/n],lab:rgbToLab([r/n,g/n,b/n]),std:Math.sqrt(Math.max(0,lum2/n-mean*mean))};
+ const bmp=await createImageBitmap(blob);
+ try{
+  const [sx,sy,sw,sh]=tileCropRect(bmp.width,bmp.height,aspect);
+  const c=document.createElement('canvas');c.width=8;c.height=8;
+  const ctx=c.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(bmp,sx,sy,sw,sh,0,0,8,8);
+  const d=ctx.getImageData(0,0,8,8).data;let r=0,g=0,b=0,lum=0,lum2=0;
+  for(let i=0;i<d.length;i+=4){r+=d[i];g+=d[i+1];b+=d[i+2];const l=.2126*d[i]+.7152*d[i+1]+.0722*d[i+2];lum+=l;lum2+=l*l;}
+  const n=64,mean=lum/n;
+  return {lab:rgbToLab([r/n,g/n,b/n]),std:Math.sqrt(Math.max(0,lum2/n-mean*mean))};
+ }finally{bmp.close();}
 }
+async function getPhotoFeature(p,aspect){
+ if(p.featureVersion===PHOTO_FEATURE_VERSION&&Math.abs((p.featureAspect||0)-aspect)<1e-6&&p.feature)return p.feature;
+ const feature=await imageFeatures(p.blob,aspect);
+ p.feature=feature;p.featureVersion=PHOTO_FEATURE_VERSION;p.featureAspect=aspect;
+ return feature;
+}
+
 function yieldUI(){return new Promise(r=>setTimeout(r,0));}
 $('makeMosaic').onclick=async()=>{
  if(busy)return;let src=await getSource();photos=await allPhotos();
@@ -144,68 +159,83 @@ $('makeMosaic').onclick=async()=>{
  if(!(tileW>0&&tileH>0)){alert('タイル寸法は0より大きい数値にしてください。');return;}
  if(!src){alert('先に元画像を選択してください');return;}
  if(photos.length<N){alert(`写真が不足しています。${N}枚必要ですが、現在${photos.length}枚です。`);return;}
- busy=true;$('makeMosaic').disabled=true;$('makeStatus').textContent='原画を実寸比率に合わせて解析しています…';setProgress('makeProgress',0);
+ busy=true;$('makeMosaic').disabled=true;$('makeStatus').textContent='原画をタイル単位で解析しています…';setProgress('makeProgress',0);
  try{
-  const source=await createImageBitmap(src),targets=new Array(N),targetLab=new Array(N),edgeStrength=new Float32Array(N);
-  const physicalRatio=(cols*tileW)/(rows*tileH),sxsy=tileCropRect(source.width,source.height,physicalRatio);
-  const tc=document.createElement('canvas');tc.width=cols;tc.height=rows;const tctx=tc.getContext('2d',{willReadFrequently:true});
-  tctx.drawImage(source,sxsy[0],sxsy[1],sxsy[2],sxsy[3],0,0,cols,rows);
-  const td=tctx.getImageData(0,0,cols,rows).data, lum=new Float32Array(N);
-  for(let i=0;i<N;i++){const rgb=[td[i*4],td[i*4+1],td[i*4+2]];targets[i]=rgb;targetLab[i]=rgbToLab(rgb);lum[i]=.2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2];}
-  source.close();let maxEdge=1;
-  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){let i=r*cols+c,gx=((c<cols-1?lum[i+1]:lum[i])-(c>0?lum[i-1]:lum[i]))*.5,gy=((r<rows-1?lum[i+cols]:lum[i])-(r>0?lum[i-cols]:lum[i]))*.5;edgeStrength[i]=Math.hypot(gx,gy);if(edgeStrength[i]>maxEdge)maxEdge=edgeStrength[i];}
-  let sortedEdges=Array.from(edgeStrength).sort((a,b)=>a-b),scale=Math.max(1,sortedEdges[Math.floor(.9*(N-1))]||1);
+  const source=await createImageBitmap(src),physicalRatio=(cols*tileW)/(rows*tileH),crop=tileCropRect(source.width,source.height,physicalRatio);
+  const tc=document.createElement('canvas');tc.width=cols*8;tc.height=rows*8;
+  const tctx=tc.getContext('2d',{willReadFrequently:true});
+  tctx.drawImage(source,crop[0],crop[1],crop[2],crop[3],0,0,tc.width,tc.height);source.close();
+  const td=tctx.getImageData(0,0,tc.width,tc.height).data;
+  const targetLab=new Array(N),targetStd=new Float32Array(N),lum=new Float32Array(N);
+  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
+   let sr=0,sg=0,sb=0,sl=0,sl2=0;
+   for(let yy=0;yy<8;yy++)for(let xx=0;xx<8;xx++){
+    const k=(((r*8+yy)*tc.width)+(c*8+xx))*4,R=td[k],G=td[k+1],B=td[k+2],L=.2126*R+.7152*G+.0722*B;
+    sr+=R;sg+=G;sb+=B;sl+=L;sl2+=L*L;
+   }
+   const i=r*cols+c,m=sl/64;targetLab[i]=rgbToLab([sr/64,sg/64,sb/64]);targetStd[i]=Math.sqrt(Math.max(0,sl2/64-m*m));lum[i]=m;
+  }
+  let maxEdge=1;const edgeStrength=new Float32Array(N);
+  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
+   const i=r*cols+c,gx=((c<cols-1?lum[i+1]:lum[i])-(c>0?lum[i-1]:lum[i]))*.5,gy=((r<rows-1?lum[i+cols]:lum[i])-(r>0?lum[i-cols]:lum[i]))*.5;
+   edgeStrength[i]=Math.hypot(gx,gy);if(edgeStrength[i]>maxEdge)maxEdge=edgeStrength[i];
+  }
+  const sortedEdges=Array.from(edgeStrength).sort((a,b)=>a-b),scale=Math.max(1,sortedEdges[Math.floor(.9*(N-1))]||1);
   for(let i=0;i<N;i++)edgeStrength[i]=Math.min(1,edgeStrength[i]/scale);
-  const photoFeat=new Array(photos.length);
-  for(let i=0;i<photos.length;i++){photoFeat[i]=await imageFeatures(photos[i].blob,aspect);if(i%20===0){setProgress('makeProgress',i/photos.length*25);$('makeStatus').textContent=`写真の特徴を解析中 ${i+1}/${photos.length}`;await yieldUI();}}
-  const targetStd=new Float32Array(N);
-  // Estimate source detail inside each physical tile (8x8 samples per tile).
-  const dc=document.createElement('canvas');dc.width=cols*8;dc.height=rows*8;const dctx=dc.getContext('2d',{willReadFrequently:true});
-  const src2=await createImageBitmap(src);dctx.drawImage(src2,sxsy[0],sxsy[1],sxsy[2],sxsy[3],0,0,cols*8,rows*8);src2.close();const dd=dctx.getImageData(0,0,dc.width,dc.height).data;
-  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){let sum=0,sum2=0;for(let yy=0;yy<8;yy++)for(let xx=0;xx<8;xx++){let k=(((r*8+yy)*dc.width)+(c*8+xx))*4,l=.2126*dd[k]+.7152*dd[k+1]+.0722*dd[k+2];sum+=l;sum2+=l*l;}let m=sum/64;targetStd[r*cols+c]=Math.sqrt(Math.max(0,sum2/64-m*m));}
-  // Greedy one-to-one initialization using CIE Lab and edge-aware lightness.
-  let used=new Uint8Array(photos.length),result=new Int32Array(N);
-  for(let i=0;i<N;i++){let t=targetLab[i],best=-1,bd=Infinity,ew=1.3+.85*edgeStrength[i];for(let j=0;j<photos.length;j++){if(used[j])continue;let p=photoFeat[j].lab,dl=(t[0]-p[0])*ew,da=(t[1]-p[1])*.68,db=(t[2]-p[2])*.68,ds=targetStd[i]-photoFeat[j].std;let cost=dl*dl+da*da+db*db+ds*ds*.035;if(cost<bd){bd=cost;best=j;}}if(best<0)throw Error('写真の割り当てに失敗しました。');result[i]=best;used[best]=1;if(i%12===0){setProgress('makeProgress',25+i/N*40);$('makeStatus').textContent=`写真を割り当て中 ${i+1}/${N}`;await yieldUI();}}
-  // Refine local and global swaps to improve adjacent Lab transitions.
+  const photoFeat=new Array(photos.length),featureUpdates=[];
+  for(let i=0;i<photos.length;i++){
+   const cached=photos[i].featureVersion===PHOTO_FEATURE_VERSION&&Math.abs((photos[i].featureAspect||0)-aspect)<1e-6&&!!photos[i].feature;
+   const f=await getPhotoFeature(photos[i],aspect);photoFeat[i]=f;
+   if(!cached)featureUpdates.push(photos[i]);
+   if(featureUpdates.length>=50){await putPhotos(featureUpdates.splice(0));}
+   if(i%20===0){setProgress('makeProgress',i/photos.length*20);$('makeStatus').textContent=`写真の特徴を解析・保存中 ${i+1}/${photos.length}`;await yieldUI();}
+  }
+  if(featureUpdates.length)await putPhotos(featureUpdates);
+  const unary=(cell,ph)=>{
+   const t=targetLab[cell],ew=1.3+.85*edgeStrength[cell],dl=(t[0]-ph.lab[0])*ew,da=(t[1]-ph.lab[1])*.68,db=(t[2]-ph.lab[2])*.68,ds=targetStd[cell]-ph.std;
+   return dl*dl+da*da+db*db+ds*ds*.035;
+  };
+  // Scarcity-aware initialization: reserve distinctive photos for cells that have few close alternatives.
+  const priority=new Array(N);
+  for(let i=0;i<N;i++){
+   let best=Infinity,second=Infinity;
+   for(let j=0;j<photos.length;j++){const cost=unary(i,photoFeat[j]);if(cost<best){second=best;best=cost;}else if(cost<second)second=cost;}
+   priority[i]={i,regret:second-best};
+   if(i%30===0){setProgress('makeProgress',20+i/N*15);$('makeStatus').textContent=`配置候補の希少度を分析中 ${i+1}/${N}`;await yieldUI();}
+  }
+  priority.sort((a,b)=>b.regret-a.regret||a.i-b.i);
+  const used=new Uint8Array(photos.length),result=new Int32Array(N);
+  for(let n=0;n<N;n++){
+   const i=priority[n].i;let best=-1,bd=Infinity;
+   for(let j=0;j<photos.length;j++){if(used[j])continue;const cost=unary(i,photoFeat[j]);if(cost<bd){bd=cost;best=j;}}
+   if(best<0)throw Error('写真の割り当てに失敗しました。');
+   result[i]=best;used[best]=1;
+   if(n%12===0){setProgress('makeProgress',35+n/N*30);$('makeStatus').textContent=`写真を重複なしで割り当て中 ${n+1}/${N}`;await yieldUI();}
+  }
+  // Refine local and global swaps against both tile fit and neighboring color transitions.
   const neighbors=Array.from({length:N},(_,i)=>{let a=[],r=Math.floor(i/cols),c=i%cols;if(c>0)a.push(i-1);if(c+1<cols)a.push(i+1);if(r>0)a.push(i-cols);if(r+1<rows)a.push(i+cols);return a;});
-  const edges=[];for(let i=0;i<N;i++)for(const j of neighbors[i])if(j>i){const a=targetLab[i],b=targetLab[j],delta=[a[0]-b[0],(a[1]-b[1])*.38,(a[2]-b[2])*.38],strength=Math.hypot(...delta),importance=.30+.70*Math.min(strength/24,1);edges.push([i,j,delta,importance]);}
   const photoTrans=photoFeat.map(x=>[x.lab[0],x.lab[1]*.38,x.lab[2]*.38]);
-  const edgeCost=(e,arr)=>{let [a,b,d,w]=e,pa=photoTrans[arr[a]],pb=photoTrans[arr[b]],x=d[0]-(pa[0]-pb[0]),y=d[1]-(pa[1]-pb[1]),z=d[2]-(pa[2]-pb[2]);return (x*x+y*y+z*z)*w;};
-  let seed=20261026;const rand=max=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return (seed>>>0)%max;};
-  const attempts=Math.min(12000,Math.max(4500,N*4));
+  const edgeCost=(a,b)=>{const d0=targetLab[a][0]-targetLab[b][0],d1=(targetLab[a][1]-targetLab[b][1])*.38,d2=(targetLab[a][2]-targetLab[b][2])*.38,strength=Math.hypot(d0,d1,d2),w=.30+.70*Math.min(strength/24,1),pa=photoTrans[result[a]],pb=photoTrans[result[b]],x=d0-(pa[0]-pb[0]),y=d1-(pa[1]-pb[1]),z=d2-(pa[2]-pb[2]);return (x*x+y*y+z*z)*w;};
+  const attempts=Math.min(30000,Math.max(9000,N*10));let seed=20261105;
+  const rand=max=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return (seed>>>0)%max;};
   for(let step=0;step<attempts;step++){
-   let a=rand(N),b;if(step%3!==0){let ns=neighbors[a];b=ns[rand(ns.length)];}else{b=rand(N-1);if(b>=a)b++;}
-   let pa=result[a],pb=result[b],fa=photoFeat[pa],fb=photoFeat[pb],ta=targetLab[a],tb=targetLab[b];
-   const unary=(cell,ph)=>{let t=targetLab[cell],ew=1.3+.85*edgeStrength[cell],dl=(t[0]-ph.lab[0])*ew,da=(t[1]-ph.lab[1])*.68,db=(t[2]-ph.lab[2])*.68,ds=targetStd[cell]-ph.std;return dl*dl+da*da+db*db+ds*ds*.035;};
+   const a=rand(N);let b;if(step%3!==0){const ns=neighbors[a];b=ns[rand(ns.length)];}else{b=rand(N-1);if(b>=a)b++;}
+   const pa=result[a],pb=result[b],fa=photoFeat[pa],fb=photoFeat[pb];
    let delta=unary(a,fb)+unary(b,fa)-unary(a,fa)-unary(b,fb);
    const affected=new Set([...neighbors[a],...neighbors[b]]);affected.add(a);affected.add(b);let before=0,after=0;
-   for(const x of affected)for(const y of neighbors[x])if(x<y&&(x===a||x===b||y===a||y===b)){let e=[x,y,[targetLab[x][0]-targetLab[y][0],(targetLab[x][1]-targetLab[y][1])*.38,(targetLab[x][2]-targetLab[y][2])*.38],.30+.70*Math.min(Math.hypot(targetLab[x][0]-targetLab[y][0],(targetLab[x][1]-targetLab[y][1])*.38,(targetLab[x][2]-targetLab[y][2])*.38)/24,1)];before+=edgeCost(e,result);let tmp=result[x];if(x===a)tmp=pb;else if(x===b)tmp=pa;let tmp2=result[y];if(y===a)tmp2=pb;else if(y===b)tmp2=pa;let p1=photoTrans[tmp],p2=photoTrans[tmp2],d=e[2],xx=d[0]-(p1[0]-p2[0]),yy=d[1]-(p1[1]-p2[1]),zz=d[2]-(p1[2]-p2[2]);after+=(xx*xx+yy*yy+zz*zz)*e[3];}
+   for(const x of affected)for(const y of neighbors[x])if(x<y&&(x===a||x===b||y===a||y===b)){
+    before+=edgeCost(x,y);const ix=x===a?pb:x===b?pa:result[x],iy=y===a?pb:y===b?pa:result[y],p1=photoTrans[ix],p2=photoTrans[iy];
+    const d0=targetLab[x][0]-targetLab[y][0],d1=(targetLab[x][1]-targetLab[y][1])*.38,d2=(targetLab[x][2]-targetLab[y][2])*.38,strength=Math.hypot(d0,d1,d2),w=.30+.70*Math.min(strength/24,1),xx=d0-(p1[0]-p2[0]),yy=d1-(p1[1]-p2[1]),zz=d2-(p1[2]-p2[2]);after+=(xx*xx+yy*yy+zz*zz)*w;
+   }
    if(delta+.20*(after-before)<-1e-6){result[a]=pb;result[b]=pa;}
-   if(step%600===0){setProgress('makeProgress',65+step/attempts*35);$('makeStatus').textContent=`隣接関係を調整中 ${step.toLocaleString()}/${attempts.toLocaleString()}`;await yieldUI();}
+   if(step%1000===0){setProgress('makeProgress',65+step/attempts*35);$('makeStatus').textContent=`隣接関係と全体配置を調整中 ${step.toLocaleString()}/${attempts.toLocaleString()}`;await yieldUI();}
   }
   assignments=Array.from(result,i=>photos[i].id);previewReady=false;$('previewStatus').textContent='配置が更新されました。プレビューを作り直してください。';
-  await metaPut('assignments',assignments);await metaPut('grid',{cols,rows,tileW,tileH,physicalRatio});$('makeStatus').textContent=`完了：${N.toLocaleString()}マスに重複なしで配置しました。Lab色差・輪郭・隣接関係を考慮しています。`;setProgress('makeProgress',100);await refreshStats();
+  await metaPut('assignments',assignments);await metaPut('grid',{cols,rows,tileW,tileH,physicalRatio});$('makeStatus').textContent=`完了：${N.toLocaleString()}マスに重複なしで配置しました。Lab色差・明暗特徴（同一8×8基準）・輪郭・隣接関係を考慮しています。`;setProgress('makeProgress',100);await refreshStats();
  }catch(e){alert('配置中にエラーが発生しました：'+(e.message||String(e)));$('makeStatus').textContent='配置に失敗しました。';}
  busy=false;$('makeMosaic').disabled=false;
 };
-async function renderMosaicPreview(){
- if(previewBusy)return;
- if(!assignments.length){alert('先に写真を自動配置してください。');return;}
- previewBusy=true;previewReady=false;const btn=$('renderPreview');btn.disabled=true;
- try{
-  photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p]));const grid=await metaGet('grid')||{cols:60,rows:50};
-  const cols=grid.cols||60,rows=grid.rows||50,N=cols*rows,tile=Math.max(4,Math.min(32,Number($('previewTileSize').value)||16)),tileH=tile*((grid.tileH||26.7)/(grid.tileW||38.1));
-  const canvas=$('mosaicPreview'),ctx=canvas.getContext('2d');canvas.width=cols*tile;canvas.height=Math.max(1,Math.round(rows*tileH));ctx.fillStyle='#e2e8f0';ctx.fillRect(0,0,canvas.width,canvas.height);
-  $('previewCount').textContent=`${assignments.length.toLocaleString()} / ${N.toLocaleString()} マス`;setProgress('previewProgress',0);let missing=0;
-  for(let i=0;i<assignments.length;i++){
-   const photo=byId.get(assignments[i]);if(!photo){missing++;continue;}let bmp=null;
-   try{bmp=await createImageBitmap(photo.thumb||photo.blob);const [cx,cy,cw,ch]=tileCropRect(bmp.width,bmp.height,(grid.tileW||38.1)/(grid.tileH||26.7));ctx.drawImage(bmp,cx,cy,cw,ch,(i%cols)*tile,Math.floor(i/cols)*tileH,tile,tileH);}catch(e){missing++;}finally{if(bmp)bmp.close();}
-   if(i%30===0){setProgress('previewProgress',(i+1)/assignments.length*100);$('previewStatus').textContent=`プレビュー作成中 ${i+1} / ${assignments.length} 枚`;await new Promise(r=>setTimeout(r,0));}
-  }
-  setProgress('previewProgress',100);previewReady=true;$('previewStatus').textContent=missing?`表示完了。ただし ${missing} 枚の画像を読み込めませんでした。`:`表示完了：${assignments.length.toLocaleString()}枚を配置順に表示しています。`;
- }catch(e){$('previewStatus').textContent='プレビューを作成できませんでした：'+(e.message||String(e));alert('プレビュー作成中にエラーが発生しました：'+(e.message||String(e)));}
- finally{previewBusy=false;btn.disabled=false;}
-}
+
 $('renderPreview').onclick=renderMosaicPreview;
 $('previewTileSize').onchange=()=>{if(previewReady)renderMosaicPreview();};
 $('savePreview').onclick=()=>{if(!previewReady){alert('先にプレビューを作成してください。');return;}$('mosaicPreview').toBlob(blob=>{if(blob)download(blob,'photo_mosaic_preview.png');else alert('PNG画像を作成できませんでした。');},'image/png');};
@@ -239,15 +269,16 @@ async function runQualityCheck(){
  if(busy||previewBusy){alert('ほかの処理が終わってから実行してください。');return;}
  if(!assignments.length){alert('先にモザイクを作成してください。');return;}
  const src=await getSource();if(!src){alert('原画が見つかりません。原画を再選択してください。');return;}
- const btn=$('runQuality');btn.disabled=true;$('qualityResult').textContent='原画と配置写真を比較しています…';$('qualityMetrics').classList.add('hidden');$('qualityAdvice').textContent='';
+ const btn=$('runQuality');btn.disabled=true;busy=true;$('qualityResult').textContent='原画と配置写真を比較しています…';$('qualityMetrics').classList.add('hidden');$('qualityAdvice').textContent='';
  try{
   const grid=await metaGet('grid')||{cols:60,rows:50,tileW:38.1,tileH:26.7},cols=grid.cols||60,rows=grid.rows||50,N=cols*rows;
   if(assignments.length!==N)throw Error(`配置数が不足しています（${assignments.length}/${N}）。`);
   photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p]));const missing=assignments.filter(id=>!byId.has(id)).length;if(missing)throw Error(`${missing}枚の写真データが見つかりません。写真を再登録してください。`);
   const aspect=(grid.tileW||38.1)/(grid.tileH||26.7),physicalRatio=(cols*(grid.tileW||38.1))/(rows*(grid.tileH||26.7));
   const source=await createImageBitmap(src),crop=tileCropRect(source.width,source.height,physicalRatio),c=document.createElement('canvas');c.width=cols*8;c.height=rows*8;const ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(source,crop[0],crop[1],crop[2],crop[3],0,0,c.width,c.height);source.close();
-  const data=ctx.getImageData(0,0,c.width,c.height).data;let sumDelta=0,sumDetail=0,sumTargetDetail=0,sumPhotoDetail=0,done=0;
-  for(let i=0;i<N;i++){const r=Math.floor(i/cols),col=i%cols;let sr=0,sg=0,sb=0,sl=0,sl2=0;for(let yy=0;yy<8;yy++)for(let xx=0;xx<8;xx++){const k=(((r*8+yy)*c.width)+(col*8+xx))*4,R=data[k],G=data[k+1],B=data[k+2],L=.2126*R+.7152*G+.0722*B;sr+=R;sg+=G;sb+=B;sl+=L;sl2+=L*L;}const meanL=sl/64,targetLab=rgbToLab([sr/64,sg/64,sb/64]),targetStd=Math.sqrt(Math.max(0,sl2/64-meanL*meanL)),p=byId.get(assignments[i]),feat=await imageFeatures(p.blob,aspect),dL=targetLab[0]-feat.lab[0],da=targetLab[1]-feat.lab[1],dbb=targetLab[2]-feat.lab[2];sumDelta+=Math.sqrt(dL*dL+da*da+dbb*dbb);sumDetail+=Math.abs(targetStd-feat.std);sumTargetDetail+=targetStd;sumPhotoDetail+=feat.std;done++;if(i%24===0){$('qualityResult').textContent=`比較中 ${i+1}/${N} 枚`;await yieldUI();}}
+  const data=ctx.getImageData(0,0,c.width,c.height).data;let sumDelta=0,sumDetail=0,sumTargetDetail=0,sumPhotoDetail=0,done=0;const featureUpdates=[];
+  for(let i=0;i<N;i++){const r=Math.floor(i/cols),col=i%cols;let sr=0,sg=0,sb=0,sl=0,sl2=0;for(let yy=0;yy<8;yy++)for(let xx=0;xx<8;xx++){const k=(((r*8+yy)*c.width)+(col*8+xx))*4,R=data[k],G=data[k+1],B=data[k+2],L=.2126*R+.7152*G+.0722*B;sr+=R;sg+=G;sb+=B;sl+=L;sl2+=L*L;}const meanL=sl/64,targetLab=rgbToLab([sr/64,sg/64,sb/64]),targetStd=Math.sqrt(Math.max(0,sl2/64-meanL*meanL)),p=byId.get(assignments[i]),cached=p.featureVersion===PHOTO_FEATURE_VERSION&&Math.abs((p.featureAspect||0)-aspect)<1e-6&&!!p.feature,feat=await getPhotoFeature(p,aspect),dL=targetLab[0]-feat.lab[0],da=targetLab[1]-feat.lab[1],dbb=targetLab[2]-feat.lab[2];if(!cached)featureUpdates.push(p);if(featureUpdates.length>=50)await putPhotos(featureUpdates.splice(0));sumDelta+=Math.sqrt(dL*dL+da*da+dbb*dbb);sumDetail+=Math.abs(targetStd-feat.std);sumTargetDetail+=targetStd;sumPhotoDetail+=feat.std;done++;if(i%24===0){$('qualityResult').textContent=`比較中 ${i+1}/${N} 枚`;await yieldUI();}}
+  if(featureUpdates.length)await putPhotos(featureUpdates);
   const avgDelta=sumDelta/done,avgDetail=sumDetail/done,meanTarget=sumTargetDetail/done,meanPhoto=sumPhotoDetail/done,score=Math.max(0,Math.min(100,100-avgDelta*1.65-avgDetail*.28));let grade,advice;
   if(avgDelta<13&&avgDetail<24){grade='良好';advice='原画の色と明暗の特徴を比較的よく再現できています。プレビューを拡大・縮小して見え方を確認してください。';}
   else if(avgDelta<21&&avgDetail<38){grade='標準';advice='全体像は再現できていますが、一部の色や明暗に差が残っています。原画の重要部分が読み取れるか、少し離れて確認してください。';}
@@ -255,7 +286,7 @@ async function runQualityCheck(){
   if(photos.length>done&&avgDelta>=21)advice+=' 未使用写真がある場合は、追加前に再生成して比較する方法もあります。';
   $('qualityResult').innerHTML=`<div class="quality-grade">${grade}</div><div>評価スコアの目安：<b>${score.toFixed(1)} / 100</b></div><div class="small">平均色差 ΔE76：${avgDelta.toFixed(1)}｜明暗特徴の平均差：${avgDetail.toFixed(1)}</div>`;$('qDelta').textContent=avgDelta.toFixed(1);$('qDetail').textContent=avgDetail.toFixed(1);$('qScore').textContent=score.toFixed(1)+' / 100';$('qualityMetrics').classList.remove('hidden');$('qualityAdvice').textContent=advice+`（原画側の明暗ばらつき平均 ${meanTarget.toFixed(1)}／写真側 ${meanPhoto.toFixed(1)}）`;
   await metaPut('qualityReport',{avgDelta,avgDetail,score,grade,createdAt:new Date().toISOString(),photoCount:photos.length,placedCount:done});
- }catch(e){$('qualityResult').textContent='評価できませんでした：'+(e.message||String(e));}finally{btn.disabled=false;}
+ }catch(e){$('qualityResult').textContent='評価できませんでした：'+(e.message||String(e));}finally{busy=false;btn.disabled=false;}
 }
 $('runQuality').onclick=runQualityCheck;
 
