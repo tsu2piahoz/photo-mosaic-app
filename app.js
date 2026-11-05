@@ -1,26 +1,122 @@
 const DB='mosaic_ipad_local_v1', STORE='photos', META='meta';
 let db, sourceBlob=null, sourceName='', assignments=[], photos=[], busy=false, previewBusy=false, previewReady=false;
+const PHOTO_PAGE_SIZE=100;let photoPage=0,selectedPhotoIds=new Set(),photoGridUrls=[];
 const $=id=>document.getElementById(id);
 function openDB(){return new Promise((resolve,reject)=>{let r=indexedDB.open(DB,1);r.onupgradeneeded=()=>{let d=r.result;d.createObjectStore(STORE,{keyPath:'id'});d.createObjectStore(META,{keyPath:'key'});};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});}
 function tx(store,mode='readonly'){return db.transaction(store,mode).objectStore(store)}
 function allPhotos(){return new Promise((res,rej)=>{let r=tx(STORE).getAll();r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});}
 function putPhoto(p){return new Promise((res,rej)=>{let r=tx(STORE,'readwrite').put(p);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
 function clearStore(){return new Promise((res,rej)=>{let r=tx(STORE,'readwrite').clear();r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
+function deletePhoto(id){return new Promise((res,rej)=>{let r=tx(STORE,'readwrite').delete(id);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
+function getPhoto(id){return new Promise((res,rej)=>{let r=tx(STORE).get(id);r.onsuccess=()=>res(r.result||null);r.onerror=()=>rej(r.error);});}
+function allPhotoIds(){return new Promise((res,rej)=>{let r=tx(STORE).getAllKeys();r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});}
+function metaDelete(key){return new Promise((res,rej)=>{let r=tx(META,'readwrite').delete(key);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
 function metaPut(key,value){return new Promise((res,rej)=>{let r=tx(META,'readwrite').put({key,value});r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
 function metaGet(key){return new Promise(res=>{let r=tx(META).get(key);r.onsuccess=()=>res(r.result?.value);r.onerror=()=>res(null);});}
 function showTab(name){document.querySelectorAll('.view').forEach(x=>x.classList.toggle('hidden',x.id!==name));document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(name==='photos'){renderPhotos();refreshStats();}if(name==='output')updateDims();if(name==='quality')initCropPreview();}
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
 async function refreshStats(){photos=await allPhotos();$('count').textContent=photos.length.toLocaleString();$('placed').textContent=assignments.length.toLocaleString();$('outputStatus').textContent=assignments.length?`${assignments.length.toLocaleString()}マスに配置済み`:'配置データがありません。';}
 function blobURL(blob){return URL.createObjectURL(blob)}
-async function renderPhotos(){photos=await allPhotos();$('photoGrid').innerHTML='';photos.slice(0,240).forEach(p=>{let img=document.createElement('img');img.src=blobURL(p.thumb||p.blob);img.title=p.name;$('photoGrid').append(img);});$('importStatus').textContent=`登録：${photos.length.toLocaleString()}枚（一覧は先頭240枚を表示）`;}
+async function renderPhotos(){
+ photos=await allPhotos();photoGridUrls.forEach(URL.revokeObjectURL);photoGridUrls=[];
+ const total=Math.max(1,Math.ceil(photos.length/PHOTO_PAGE_SIZE));photoPage=Math.min(photoPage,total-1);
+ const sel=$('photoPage');if(sel){const old=String(photoPage);sel.innerHTML='';for(let i=0;i<total;i++){const from=i*PHOTO_PAGE_SIZE+1,to=Math.min(photos.length,(i+1)*PHOTO_PAGE_SIZE),o=document.createElement('option');o.value=i;o.textContent=`${i+1}ページ目（${from}〜${to}）`;sel.append(o);}sel.value=String(photoPage);}
+ const from=photoPage*PHOTO_PAGE_SIZE,to=Math.min(photos.length,from+PHOTO_PAGE_SIZE),grid=$('photoGrid');grid.innerHTML='';
+ for(const p of photos.slice(from,to)){
+  const card=document.createElement('div');card.className='photo-card';const img=document.createElement('img');img.src=blobURL(p.thumb||p.blob);photoGridUrls.push(img.src);img.alt=p.name;img.title=p.name;
+  const label=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.checked=selectedPhotoIds.has(p.id);check.onchange=()=>{if(check.checked)selectedPhotoIds.add(p.id);else selectedPhotoIds.delete(p.id);updatePhotoSelectionCount();};const name=document.createElement('span');name.textContent=p.name;name.title=p.name;label.append(check,name);card.append(img,label);grid.append(card);
+ }
+ $('photoPageInfo').textContent=`${photos.length?from+1:0}〜${to} / ${photos.length.toLocaleString()}枚`;
+ $('importStatus').textContent=`登録：${photos.length.toLocaleString()}枚（${total}ページ・1ページ${PHOTO_PAGE_SIZE}枚）`;
+ updatePhotoSelectionCount();
+}
+function updatePhotoSelectionCount(){const b=$('deleteSelectedPhotos');if(b)b.textContent=`選択した写真を削除（${selectedPhotoIds.size}）`;}
+$('photoPage').onchange=async e=>{photoPage=+e.target.value||0;await renderPhotos();};
+$('selectPhotoPage').onclick=async()=>{const from=photoPage*PHOTO_PAGE_SIZE,to=Math.min(photos.length,from+PHOTO_PAGE_SIZE);for(const p of photos.slice(from,to))selectedPhotoIds.add(p.id);await renderPhotos();};
+$('clearPhotoSelection').onclick=async()=>{selectedPhotoIds.clear();await renderPhotos();};
+$('deleteSelectedPhotos').onclick=async()=>{
+ if(!selectedPhotoIds.size){alert('削除する写真を選択してください。');return;}
+ const ids=[...selectedPhotoIds],assignedSet=new Set(assignments),assignedCount=ids.filter(id=>assignedSet.has(id)).length;
+ const warning=assignedCount?`\n\nこの中に配置済み写真が${assignedCount}枚含まれています。削除すると現在の配置データとプレビューをリセットし、再配置が必要になります。`:'';
+ if(!confirm(`選択した${ids.length}枚の写真を削除しますか？${warning}`))return;
+ for(let i=0;i<ids.length;i++){await deletePhoto(ids[i]);if(i%50===0)await new Promise(r=>setTimeout(r,0));}
+ if(assignedCount){assignments=[];previewReady=false;await metaPut('assignments',[]);await metaDelete('qualityReport');$('previewStatus').textContent='写真を削除したため配置データをリセットしました。再配置してください。';}
+ ids.forEach(id=>selectedPhotoIds.delete(id));await renderPhotos();await refreshStats();
+ $('importStatus').textContent=`${ids.length}枚を削除しました。${assignedCount?'配置データをリセットしました。':'既存の配置データは維持されています。'}`;
+};
 function setProgress(id,n){$(id).style.width=Math.max(0,Math.min(100,n))+'%'}
-async function addFiles(files){if(busy)return;busy=true;let good=0,skip=0;let start=(await allPhotos()).length;for(let i=0;i<files.length;i++){let f=files[i];if(!f.type.startsWith('image/')){skip++;continue;}try{let bmp=await createImageBitmap(f);let c=document.createElement('canvas');let scale=Math.min(1,180/Math.max(bmp.width,bmp.height));c.width=Math.max(1,Math.round(bmp.width*scale));c.height=Math.max(1,Math.round(bmp.height*scale));c.getContext('2d').drawImage(bmp,0,0,c.width,c.height);let thumb=await new Promise(r=>c.toBlob(r,'image/jpeg',.78));await putPhoto({id:crypto.randomUUID(),name:f.name,blob:f,thumb,width:bmp.width,height:bmp.height});bmp.close();good++;}catch(e){skip++;}setProgress('importProgress',(i+1)/files.length*100);$('importStatus').textContent=`取り込み中 ${i+1}/${files.length}｜成功 ${good}枚`;if(i%20===0)await new Promise(r=>setTimeout(r,0));}
-busy=false;await renderPhotos();await refreshStats();$('importStatus').textContent=`追加 ${good}枚／スキップ ${skip}枚｜合計 ${(start+good).toLocaleString()}枚`;}
+// Store only a resized JPEG derivative. Original image bytes are never written to IndexedDB.
+const PHOTO_MAX_EDGE=1024,PHOTO_JPEG_QUALITY=.88,THUMB_MAX_EDGE=180;
+function canvasToJpeg(canvas,quality){return new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(new Error('JPEG画像を作成できませんでした。')),'image/jpeg',quality));}
+async function optimizeImageBlob(input){
+ let bmp;
+ try{
+  bmp=await createImageBitmap(input);
+  const scale=Math.min(1,PHOTO_MAX_EDGE/Math.max(bmp.width,bmp.height));
+  const width=Math.max(1,Math.round(bmp.width*scale)),height=Math.max(1,Math.round(bmp.height*scale));
+  const c=document.createElement('canvas');c.width=width;c.height=height;
+  const ctx=c.getContext('2d',{alpha:false});if(!ctx)throw new Error('画像処理用Canvasを作成できません。');
+  ctx.fillStyle='#fff';ctx.fillRect(0,0,width,height);ctx.drawImage(bmp,0,0,width,height);
+  const blob=await canvasToJpeg(c,PHOTO_JPEG_QUALITY);
+  const ts=Math.min(1,THUMB_MAX_EDGE/Math.max(bmp.width,bmp.height)),tw=Math.max(1,Math.round(bmp.width*ts)),th=Math.max(1,Math.round(bmp.height*ts));
+  const tc=document.createElement('canvas');tc.width=tw;tc.height=th;const tctx=tc.getContext('2d',{alpha:false});
+  tctx.fillStyle='#fff';tctx.fillRect(0,0,tw,th);tctx.drawImage(bmp,0,0,tw,th);
+  const thumb=await canvasToJpeg(tc,.78);
+  return {blob,thumb,width,height,sourceWidth:bmp.width,sourceHeight:bmp.height};
+ }finally{if(bmp)bmp.close();}
+}
+async function addFiles(files){
+ if(busy)return;busy=true;let good=0,skip=0,saved=0,original=0;let start=(await allPhotos()).length;
+ try{
+  for(let i=0;i<files.length;i++){
+   const f=files[i];
+   if(!f.type.startsWith('image/'))skip++;
+   else try{
+    const z=await optimizeImageBlob(f),id=crypto.randomUUID();
+    await putPhoto({id,name:f.name,blob:z.blob,thumb:z.thumb,width:z.width,height:z.height,optimized:true,originalBytes:f.size,savedBytes:z.blob.size+z.thumb.size});
+    good++;original+=f.size;saved+=z.blob.size+z.thumb.size;
+   }catch(err){skip++;}
+   setProgress('importProgress',(i+1)/Math.max(1,files.length)*100);
+   $('importStatus').textContent=`最適化して取り込み中 ${i+1}/${files.length}｜成功 ${good}枚｜保存 ${(saved/1048576).toFixed(1)}MB`;
+   if(i%4===0)await new Promise(r=>setTimeout(r,0));
+  }
+ }finally{busy=false;}
+ await renderPhotos();await refreshStats();
+ const rate=original?Math.max(0,100-(saved/original*100)):0;
+ $('importStatus').textContent=`追加 ${good}枚／スキップ ${skip}枚｜保存 ${(saved/1048576).toFixed(1)}MB（元データ比 約${rate.toFixed(0)}%削減）｜合計 ${(start+good).toLocaleString()}枚`;
+}
+
+// One-time, resumable migration for full-resolution photos imported by v5/v6.1.
+async function migrateExistingPhotos(){
+ const migrationVersion=await metaGet('photoOptimizationVersion');if(migrationVersion>=2)return;
+ const ids=await allPhotoIds();if(!ids.length){await metaPut('photoOptimizationVersion',2);return;}
+ busy=true;let checked=0,done=0,failed=0,oldBytes=0,newBytes=0;$('count').textContent=ids.length.toLocaleString();
+ try{
+  $('importStatus').textContent=`既存写真を確認・最適化しています 0/${ids.length}枚。画面を閉じずにお待ちください。`;
+  for(const id of ids){
+   const p=await getPhoto(id);
+   if(p&&(!p.optimized||!(p.blob instanceof Blob)||p.blob.type!=='image/jpeg'||Math.max(p.width||0,p.height||0)>PHOTO_MAX_EDGE)){
+    try{
+     oldBytes+=p.blob?.size||0;const z=await optimizeImageBlob(p.blob);
+     await putPhoto({...p,blob:z.blob,thumb:z.thumb,width:z.width,height:z.height,optimized:true,originalBytes:p.originalBytes||p.blob?.size||0,savedBytes:z.blob.size+z.thumb.size});
+     newBytes+=z.blob.size+z.thumb.size;done++;
+    }catch(err){failed++;console.warn('写真の最適化をスキップ:',p.name,err);}
+   }
+   checked++;setProgress('importProgress',checked/ids.length*100);
+   if(checked%5===0||checked===ids.length){$('importStatus').textContent=`既存写真を確認・最適化しています ${checked}/${ids.length}枚｜変換 ${done}枚｜保存 ${(newBytes/1048576).toFixed(1)}MB`;await new Promise(r=>setTimeout(r,0));}
+  }
+ }finally{busy=false;}
+ if(failed===0)await metaPut('photoOptimizationVersion',2);
+ if(failed){$('importStatus').textContent=`既存写真の最適化：${done}枚変換／${failed}枚失敗。失敗分は元データのまま残し、次回起動時に再試行します。`;}
+ else if(done){const rate=oldBytes?Math.max(0,100-newBytes/oldBytes*100):0;$('importStatus').textContent=`既存写真の最適化が完了しました：${done}枚｜保存 ${(newBytes/1048576).toFixed(1)}MB（元データ比 約${rate.toFixed(0)}%削減）`;}
+ else $('importStatus').textContent='登録済み写真はすべて最適化済みです。';
+}
+
 $('filesInput').onchange=e=>addFiles([...e.target.files]);
 async function readZipEntries(buf){const dv=new DataView(buf),u8=new Uint8Array(buf);let eocd=-1;for(let i=u8.length-22;i>=Math.max(0,u8.length-65558);i--){if(dv.getUint32(i,true)===0x06054b50){eocd=i;break;}}if(eocd<0)throw Error('ZIPの形式を読み取れません');let count=dv.getUint16(eocd+10,true),off=dv.getUint32(eocd+16,true),out=[];for(let n=0;n<count;n++){if(dv.getUint32(off,true)!==0x02014b50)break;let method=dv.getUint16(off+10,true),cs=dv.getUint32(off+20,true),nl=dv.getUint16(off+28,true),el=dv.getUint16(off+30,true),cl=dv.getUint16(off+32,true),lo=dv.getUint32(off+42,true);let name=new TextDecoder().decode(u8.slice(off+46,off+46+nl));if(!name.endsWith('/')){let lnl=dv.getUint16(lo+26,true),lel=dv.getUint16(lo+28,true),dataStart=lo+30+lnl+lel,comp=u8.slice(dataStart,dataStart+cs);let data;if(method===0)data=comp;else if(method===8){if(!('DecompressionStream'in window))throw Error('このSafariではZIP展開に対応していません。ファイルから画像を選択してください。');let ds=new DecompressionStream('deflate-raw');data=new Uint8Array(await new Response(new Blob([comp]).stream().pipeThrough(ds)).arrayBuffer());}else{data=null;}if(data)out.push(new File([data],name.split('/').pop(),{type:mime(name)}));}off+=46+nl+el+cl;}return out;}
 function mime(n){let e=n.toLowerCase().split('.').pop();return ({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',gif:'image/gif',heic:'image/heic',avif:'image/avif'})[e]||'application/octet-stream';}
 $('zipInput').onchange=async e=>{let f=e.target.files[0];if(!f)return;try{$('importStatus').textContent='ZIPを展開しています…';let files=await readZipEntries(await f.arrayBuffer());await addFiles(files);}catch(err){alert(err.message||String(err));}e.target.value='';};
-$('clearPhotos').onclick=async()=>{if(confirm('登録した写真をすべて削除しますか？配置データも消去されます。')){await clearStore();assignments=[];previewReady=false;await metaPut('assignments',[]);await renderPhotos();await refreshStats();}};
+$('clearPhotos').onclick=async()=>{if(confirm('登録した写真をすべて削除しますか？配置データも消去されます。')){await clearStore();selectedPhotoIds.clear();photoPage=0;assignments=[];previewReady=false;await metaPut('assignments',[]);await metaDelete('qualityReport');await renderPhotos();await refreshStats();}};
 $('sourceInput').onchange=async e=>{let f=e.target.files[0];if(!f)return;sourceBlob=f;sourceName=f.name;$('sourceStatus').textContent=`原画：${f.name}`;let bmp=await createImageBitmap(f);let c=$('preview'),ctx=c.getContext('2d');let scale=Math.min(c.width/bmp.width,c.height/bmp.height);let w=bmp.width*scale,h=bmp.height*scale;ctx.fillStyle='#fff';ctx.fillRect(0,0,c.width,c.height);ctx.drawImage(bmp,(c.width-w)/2,(c.height-h)/2,w,h);bmp.close();await metaPut('source',{blob:f,name:f.name});};
 async function getSource(){if(sourceBlob)return sourceBlob;let x=await metaGet('source');if(x){sourceBlob=x.blob;sourceName=x.name;return sourceBlob;}return null;}
 function rgbToLab(rgb){
@@ -61,7 +157,7 @@ $('makeMosaic').onclick=async()=>{
   let sortedEdges=Array.from(edgeStrength).sort((a,b)=>a-b),scale=Math.max(1,sortedEdges[Math.floor(.9*(N-1))]||1);
   for(let i=0;i<N;i++)edgeStrength[i]=Math.min(1,edgeStrength[i]/scale);
   const photoFeat=new Array(photos.length);
-  for(let i=0;i<photos.length;i++){photoFeat[i]=await imageFeatures(photos[i].thumb||photos[i].blob,aspect);if(i%20===0){setProgress('makeProgress',i/photos.length*25);$('makeStatus').textContent=`写真の特徴を解析中 ${i+1}/${photos.length}`;await yieldUI();}}
+  for(let i=0;i<photos.length;i++){photoFeat[i]=await imageFeatures(photos[i].blob,aspect);if(i%20===0){setProgress('makeProgress',i/photos.length*25);$('makeStatus').textContent=`写真の特徴を解析中 ${i+1}/${photos.length}`;await yieldUI();}}
   const targetStd=new Float32Array(N);
   // Estimate source detail inside each physical tile (8x8 samples per tile).
   const dc=document.createElement('canvas');dc.width=cols*8;dc.height=rows*8;const dctx=dc.getContext('2d',{willReadFrequently:true});
@@ -151,7 +247,7 @@ async function runQualityCheck(){
   const aspect=(grid.tileW||38.1)/(grid.tileH||26.7),physicalRatio=(cols*(grid.tileW||38.1))/(rows*(grid.tileH||26.7));
   const source=await createImageBitmap(src),crop=tileCropRect(source.width,source.height,physicalRatio),c=document.createElement('canvas');c.width=cols*8;c.height=rows*8;const ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(source,crop[0],crop[1],crop[2],crop[3],0,0,c.width,c.height);source.close();
   const data=ctx.getImageData(0,0,c.width,c.height).data;let sumDelta=0,sumDetail=0,sumTargetDetail=0,sumPhotoDetail=0,done=0;
-  for(let i=0;i<N;i++){const r=Math.floor(i/cols),col=i%cols;let sr=0,sg=0,sb=0,sl=0,sl2=0;for(let yy=0;yy<8;yy++)for(let xx=0;xx<8;xx++){const k=(((r*8+yy)*c.width)+(col*8+xx))*4,R=data[k],G=data[k+1],B=data[k+2],L=.2126*R+.7152*G+.0722*B;sr+=R;sg+=G;sb+=B;sl+=L;sl2+=L*L;}const meanL=sl/64,targetLab=rgbToLab([sr/64,sg/64,sb/64]),targetStd=Math.sqrt(Math.max(0,sl2/64-meanL*meanL)),p=byId.get(assignments[i]),feat=await imageFeatures(p.thumb||p.blob,aspect),dL=targetLab[0]-feat.lab[0],da=targetLab[1]-feat.lab[1],dbb=targetLab[2]-feat.lab[2];sumDelta+=Math.sqrt(dL*dL+da*da+dbb*dbb);sumDetail+=Math.abs(targetStd-feat.std);sumTargetDetail+=targetStd;sumPhotoDetail+=feat.std;done++;if(i%24===0){$('qualityResult').textContent=`比較中 ${i+1}/${N} 枚`;await yieldUI();}}
+  for(let i=0;i<N;i++){const r=Math.floor(i/cols),col=i%cols;let sr=0,sg=0,sb=0,sl=0,sl2=0;for(let yy=0;yy<8;yy++)for(let xx=0;xx<8;xx++){const k=(((r*8+yy)*c.width)+(col*8+xx))*4,R=data[k],G=data[k+1],B=data[k+2],L=.2126*R+.7152*G+.0722*B;sr+=R;sg+=G;sb+=B;sl+=L;sl2+=L*L;}const meanL=sl/64,targetLab=rgbToLab([sr/64,sg/64,sb/64]),targetStd=Math.sqrt(Math.max(0,sl2/64-meanL*meanL)),p=byId.get(assignments[i]),feat=await imageFeatures(p.blob,aspect),dL=targetLab[0]-feat.lab[0],da=targetLab[1]-feat.lab[1],dbb=targetLab[2]-feat.lab[2];sumDelta+=Math.sqrt(dL*dL+da*da+dbb*dbb);sumDetail+=Math.abs(targetStd-feat.std);sumTargetDetail+=targetStd;sumPhotoDetail+=feat.std;done++;if(i%24===0){$('qualityResult').textContent=`比較中 ${i+1}/${N} 枚`;await yieldUI();}}
   const avgDelta=sumDelta/done,avgDetail=sumDetail/done,meanTarget=sumTargetDetail/done,meanPhoto=sumPhotoDetail/done,score=Math.max(0,Math.min(100,100-avgDelta*1.65-avgDetail*.28));let grade,advice;
   if(avgDelta<13&&avgDetail<24){grade='良好';advice='原画の色と明暗の特徴を比較的よく再現できています。プレビューを拡大・縮小して見え方を確認してください。';}
   else if(avgDelta<21&&avgDetail<38){grade='標準';advice='全体像は再現できていますが、一部の色や明暗に差が残っています。原画の重要部分が読み取れるか、少し離れて確認してください。';}
@@ -163,7 +259,7 @@ async function runQualityCheck(){
 }
 $('runQuality').onclick=runQualityCheck;
 
-(async()=>{try{db=await openDB();let s=await metaGet('source');if(s){sourceBlob=s.blob;sourceName=s.name;$('sourceStatus').textContent=`原画：${s.name}`;}assignments=await metaGet('assignments')||[];let g=await metaGet('grid');if(g){$('cols').value=g.cols;$('rows').value=g.rows;}await refreshStats();updateDims();}catch(e){alert('ローカル保存を開始できません。Safariのプライベートブラウズではなく通常モードで開いてください。');}})();
+(async()=>{try{db=await openDB();let s=await metaGet('source');if(s){sourceBlob=s.blob;sourceName=s.name;$('sourceStatus').textContent=`原画：${s.name}`;}assignments=await metaGet('assignments')||[];let g=await metaGet('grid');if(g){$('cols').value=g.cols;$('rows').value=g.rows;}updateDims();await migrateExistingPhotos();await refreshStats();await renderPhotos();}catch(e){console.error(e);alert('ローカル保存または写真の最適化を開始できません。Safariの通常モードで開き、空き容量を確認してください。');}})();
 if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
 
 
@@ -221,7 +317,7 @@ let cropPreviewUrls=[];
 async function renderCropPreview(){
  const grid=$('cropPreviewGrid');cropPreviewUrls.forEach(URL.revokeObjectURL);cropPreviewUrls=[];grid.innerHTML='';
  if(!assignments.length){$('cropPreviewInfo').textContent='配置データがありません。';$('cropPreviewStatus').textContent='先に自動配置してください。';return;}
- photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p])),pageSize=24,total=Math.ceil(assignments.length/pageSize),page=Math.min(total-1,Math.max(0,+$('cropPreviewPage').value||0)),from=page*pageSize,to=Math.min(assignments.length,from+pageSize);
+ photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p])),pageSize=100,total=Math.ceil(assignments.length/pageSize),page=Math.min(total-1,Math.max(0,+$('cropPreviewPage').value||0)),from=page*pageSize,to=Math.min(assignments.length,from+pageSize);
  const fragment=document.createDocumentFragment();let missing=0;
  for(let i=from;i<to;i++){
   const p=byId.get(assignments[i]);if(!p){missing++;continue;}
@@ -230,7 +326,7 @@ async function renderCropPreview(){
  grid.append(fragment);$('cropPreviewInfo').textContent=`${from+1}〜${to} / ${assignments.length}枚`;$('cropPreviewStatus').textContent=missing?`${missing}枚の写真データが見つかりません。`:'写真は実際のタイル比率で中央トリミング表示しています。';
 }
 $('cropPreviewPage').onchange=renderCropPreview;
-async function initCropPreview(){const total=Math.max(1,Math.ceil(assignments.length/24)),sel=$('cropPreviewPage');sel.innerHTML='';for(let i=0;i<total;i++){const o=document.createElement('option');o.value=i;o.textContent=`${i+1}ページ目`;sel.append(o);}await renderCropPreview();}
+async function initCropPreview(){const pageSize=100,total=Math.max(1,Math.ceil(assignments.length/pageSize)),sel=$('cropPreviewPage'),old=Math.min(total-1,Math.max(0,+sel.value||0));sel.innerHTML='';for(let i=0;i<total;i++){const from=i*pageSize+1,to=Math.min(assignments.length,(i+1)*pageSize),o=document.createElement('option');o.value=i;o.textContent=`${i+1}ページ目（${from}〜${to}）`;sel.append(o);}sel.value=String(old);await renderCropPreview();}
 const oldShowTab=showTab;
 showTab=function(name){oldShowTab(name);if(name==='output'){updatePrintSheetInfo();initCropPreview();}};
 updatePrintSheetInfo();
