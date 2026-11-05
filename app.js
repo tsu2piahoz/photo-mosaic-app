@@ -129,7 +129,7 @@ function rgbToLab(rgb){
  const fx=f(x),fy=f(y),fz=f(z);return [116*fy-16,500*(fx-fy),200*(fy-fz)];
 }
 function tileCropRect(w,h,aspect){let a=w/h;if(a>aspect){let nw=h*aspect;return [(w-nw)/2,0,nw,h];}let nh=w/aspect;return [0,(h-nh)/2,w,nh];}
-const PHOTO_FEATURE_VERSION=2;
+const PHOTO_FEATURE_VERSION=3;
 async function imageFeatures(blob,aspect){
  const bmp=await createImageBitmap(blob);
  try{
@@ -137,10 +137,15 @@ async function imageFeatures(blob,aspect){
   const c=document.createElement('canvas');c.width=8;c.height=8;
   const ctx=c.getContext('2d',{willReadFrequently:true});
   ctx.drawImage(bmp,sx,sy,sw,sh,0,0,8,8);
-  const d=ctx.getImageData(0,0,8,8).data;let r=0,g=0,b=0,lum=0,lum2=0;
+  const d=ctx.getImageData(0,0,8,8).data;let r=0,g=0,b=0,lum=0,lum2=0;const cells=[];
+  for(let cy=0;cy<4;cy++)for(let cx=0;cx<4;cx++){
+   let cr=0,cg=0,cb=0;
+   for(let yy=0;yy<2;yy++)for(let xx=0;xx<2;xx++){const k=(((cy*2+yy)*8)+(cx*2+xx))*4;cr+=d[k];cg+=d[k+1];cb+=d[k+2];}
+   cells.push(rgbToLab([cr/4,cg/4,cb/4]));
+  }
   for(let i=0;i<d.length;i+=4){r+=d[i];g+=d[i+1];b+=d[i+2];const l=.2126*d[i]+.7152*d[i+1]+.0722*d[i+2];lum+=l;lum2+=l*l;}
   const n=64,mean=lum/n;
-  return {lab:rgbToLab([r/n,g/n,b/n]),std:Math.sqrt(Math.max(0,lum2/n-mean*mean))};
+  return {lab:rgbToLab([r/n,g/n,b/n]),std:Math.sqrt(Math.max(0,lum2/n-mean*mean)),cells};
  }finally{bmp.close();}
 }
 async function getPhotoFeature(p,aspect){
@@ -166,7 +171,7 @@ $('makeMosaic').onclick=async()=>{
   const tctx=tc.getContext('2d',{willReadFrequently:true});
   tctx.drawImage(source,crop[0],crop[1],crop[2],crop[3],0,0,tc.width,tc.height);source.close();
   const td=tctx.getImageData(0,0,tc.width,tc.height).data;
-  const targetLab=new Array(N),targetStd=new Float32Array(N),lum=new Float32Array(N);
+  const targetLab=new Array(N),targetStd=new Float32Array(N),targetCells=new Array(N),lum=new Float32Array(N);
   for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
    let sr=0,sg=0,sb=0,sl=0,sl2=0;
    for(let yy=0;yy<8;yy++)for(let xx=0;xx<8;xx++){
@@ -174,6 +179,7 @@ $('makeMosaic').onclick=async()=>{
     sr+=R;sg+=G;sb+=B;sl+=L;sl2+=L*L;
    }
    const i=r*cols+c,m=sl/64;targetLab[i]=rgbToLab([sr/64,sg/64,sb/64]);targetStd[i]=Math.sqrt(Math.max(0,sl2/64-m*m));lum[i]=m;
+   const sub=[];for(let sy=0;sy<4;sy++)for(let sx=0;sx<4;sx++){let ar=0,ag=0,ab=0;for(let dy=0;dy<2;dy++)for(let dx=0;dx<2;dx++){const k=(((r*8+sy*2+dy)*tc.width)+(c*8+sx*2+dx))*4;ar+=td[k];ag+=td[k+1];ab+=td[k+2];}sub.push(rgbToLab([ar/4,ag/4,ab/4]));}targetCells[i]=sub;
   }
   let maxEdge=1;const edgeStrength=new Float32Array(N);
   for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
@@ -193,7 +199,8 @@ $('makeMosaic').onclick=async()=>{
   if(featureUpdates.length)await putPhotos(featureUpdates);
   const unary=(cell,ph)=>{
    const t=targetLab[cell],ew=1.3+.85*edgeStrength[cell],dl=(t[0]-ph.lab[0])*ew,da=(t[1]-ph.lab[1])*.68,db=(t[2]-ph.lab[2])*.68,ds=targetStd[cell]-ph.std;
-   return dl*dl+da*da+db*db+ds*ds*.035;
+   let spatial=0;const a=targetCells[cell],b=ph.cells||[];for(let k=0;k<Math.min(a.length,b.length);k++){const x=a[k][0]-b[k][0],y=(a[k][1]-b[k][1])*.55,z=(a[k][2]-b[k][2])*.55;spatial+=x*x+y*y+z*z;}spatial/=Math.max(1,Math.min(a.length,b.length));
+   return dl*dl+da*da+db*db+ds*ds*.035+spatial*.42;
   };
   // Scarcity-aware initialization: reserve distinctive photos for cells that have few close alternatives.
   const priority=new Array(N);
@@ -236,6 +243,25 @@ $('makeMosaic').onclick=async()=>{
  busy=false;$('makeMosaic').disabled=false;
 };
 
+async function renderMosaicPreview(){
+ if(previewBusy||busy){$('previewStatus').textContent='ほかの処理が終わってからプレビューを作成してください。';return;}
+ if(!assignments.length){alert('先に写真を自動配置してください。');return;}
+ previewBusy=true;previewReady=false;const btn=$('renderPreview');btn.disabled=true;
+ try{
+  photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p]));const grid=await metaGet('grid')||{cols:60,rows:50};
+  const cols=grid.cols||60,rows=grid.rows||50,N=cols*rows,tile=Math.max(4,Math.min(32,Number($('previewTileSize').value)||16)),tileH=tile*((grid.tileH||26.7)/(grid.tileW||38.1));
+  const canvas=$('mosaicPreview'),ctx=canvas.getContext('2d');canvas.width=cols*tile;canvas.height=Math.max(1,Math.round(rows*tileH));ctx.fillStyle='#e2e8f0';ctx.fillRect(0,0,canvas.width,canvas.height);
+  $('previewCount').textContent=`${assignments.length.toLocaleString()} / ${N.toLocaleString()} マス`;setProgress('previewProgress',0);let missing=0;
+  for(let i=0;i<assignments.length;i++){
+   const photo=byId.get(assignments[i]);if(!photo){missing++;continue;}let bmp=null;
+   try{bmp=await createImageBitmap(photo.thumb||photo.blob);const [cx,cy,cw,ch]=tileCropRect(bmp.width,bmp.height,(grid.tileW||38.1)/(grid.tileH||26.7));ctx.drawImage(bmp,cx,cy,cw,ch,(i%cols)*tile,Math.floor(i/cols)*tileH,tile,tileH);}catch(e){missing++;}finally{if(bmp)bmp.close();}
+   if(i%30===0){setProgress('previewProgress',(i+1)/assignments.length*100);$('previewStatus').textContent=`プレビュー作成中 ${i+1} / ${assignments.length} 枚`;await new Promise(r=>setTimeout(r,0));}
+  }
+  setProgress('previewProgress',100);previewReady=true;$('previewStatus').textContent=missing?`表示完了。ただし ${missing} 枚の画像を読み込めませんでした。`:`表示完了：${assignments.length.toLocaleString()}枚を配置順に表示しています。`;
+ }catch(e){$('previewStatus').textContent='プレビューを作成できませんでした：'+(e.message||String(e));alert('プレビュー作成中にエラーが発生しました：'+(e.message||String(e)));}
+ finally{previewBusy=false;btn.disabled=false;}
+}
+
 $('renderPreview').onclick=renderMosaicPreview;
 $('previewTileSize').onchange=()=>{if(previewReady)renderMosaicPreview();};
 $('savePreview').onclick=()=>{if(!previewReady){alert('先にプレビューを作成してください。');return;}$('mosaicPreview').toBlob(blob=>{if(blob)download(blob,'photo_mosaic_preview.png');else alert('PNG画像を作成できませんでした。');},'image/png');};
@@ -264,7 +290,7 @@ $('printMap').onclick=async()=>{
 };
 
 
-// v6: visual quality diagnostics. This is a heuristic guide, not a perceptual certification.
+// v7: spatial-feature matching. Quality diagnostics remain heuristic, not a perceptual certification.
 async function runQualityCheck(){
  if(busy||previewBusy){alert('ほかの処理が終わってから実行してください。');return;}
  if(!assignments.length){alert('先にモザイクを作成してください。');return;}
