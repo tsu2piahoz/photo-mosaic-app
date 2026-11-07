@@ -344,7 +344,7 @@ $('runQuality').onclick=runQualityCheck;
 if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
 
 
-// v5: batch print without marks on the photo tiles; keep the index on a separate map.
+// v11: zero-gap tile printing, full-perimeter crop marks, and page/photo reprints.
 function getPrintLayout(){
  const paper=$('printPaper').value,w=Number($('tileW').value),h=Number($('tileH').value),margin=Number($('printMargin').value);
  const gap=0,markLen=3,headerH=10;
@@ -356,69 +356,73 @@ function getPrintLayout(){
  return {paper,w,h,gap,margin,cols,rows,perPage:cols*rows,pageW,pageH,contentW,contentH,gridW,gridH,gridX,gridY,markLen,headerH};
 }
 function updatePrintSheetInfo(){
- try{const x=getPrintLayout(),n=assignments.length,pages=Math.ceil(n/x.perPage),batch=+$('printBatchSize').value||5,start=+$('printStartPage').value||1,end=Math.min(pages,start+batch-1);$('printSheetInfo').textContent=`${x.paper}縦／${x.cols}列 × ${x.rows}行＝1用紙${x.perPage}枚。全${pages.toLocaleString()}用紙。写真間隔0mm・境界線なし・外周トンボあり。今回：${start}〜${Math.max(start,end)}用紙（最大${batch}用紙）。`; $('printStartPage').max=Math.max(1,pages);}
- catch(e){$('printSheetInfo').textContent=e.message;}
+ try{const x=getPrintLayout(),n=assignments.length,pages=Math.ceil(n/x.perPage),batch=+$('printBatchSize').value||5,start=+$('printStartPage').value||1,end=Math.min(pages,start+batch-1),photoMode=$('printTargetMode')?.value==='photos';
+  $('printSheetInfo').textContent=photoMode?`写真番号を指定して個別再印刷します。例：12,18,25-28。現在 ${n.toLocaleString()}枚。写真間隔0mm・境界線なし・外周全辺トンボあり。`:`${x.paper}縦／${x.cols}列 × ${x.rows}行＝1用紙${x.perPage}枚。全${pages.toLocaleString()}用紙。写真間隔0mm・境界線なし・外周全辺トンボあり。今回：${start}〜${Math.max(start,end)}用紙（最大${batch}用紙）。`;
+  $('printStartPage').max=Math.max(1,pages);$('printPhotoNumbersWrap').classList.toggle('hidden',!photoMode);$('printStartPageWrap').classList.toggle('hidden',photoMode);$('printBatchSizeWrap').classList.toggle('hidden',photoMode);
+ }catch(e){$('printSheetInfo').textContent=e.message;}
 }
-['printPaper','printMargin','printBatchSize','printStartPage','printOutputMode','printDuplexEdge','printBackLabel'].forEach(id=>$(id).addEventListener('change',updatePrintSheetInfo));
+['printPaper','printMargin','printBatchSize','printStartPage','printOutputMode','printDuplexEdge','printBackLabel','printTargetMode'].forEach(id=>$(id)?.addEventListener('change',updatePrintSheetInfo));
+function parsePhotoNumberList(raw,total){
+ const out=[],seen=new Set();for(const token of String(raw||'').split(/[、,，\s]+/).filter(Boolean)){
+  const m=token.match(/^(\d+)(?:-(\d+))?$/);if(!m)throw Error(`写真番号「${token}」の形式が正しくありません。例：12,18,25-28`);
+  const a=Number(m[1]),b=Number(m[2]||m[1]);if(a<1||b<a||b>total)throw Error(`写真番号は1〜${total}の範囲で指定してください。`);
+  for(let n=a;n<=b;n++)if(!seen.has(n)){seen.add(n);out.push(n-1);}
+ }
+ if(!out.length)throw Error('再印刷する写真番号を入力してください。');return out;
+}
 $('printPhotoSheets').onclick=async()=>{
  if(busy||previewBusy){alert('ほかの処理が終わってから実行してください。');return;}
  if(!assignments.length){alert('先に写真を自動配置してください。');return;}
  let layout;try{layout=getPrintLayout();}catch(e){alert(e.message);return;}
- const totalPages=Math.ceil(assignments.length/layout.perPage),batch=+$('printBatchSize').value||5,startPage=+$('printStartPage').value||1;
- if(!Number.isInteger(startPage)||startPage<1||startPage>totalPages){alert(`開始ページは1〜${totalPages}の範囲で指定してください。`);return;}
- const endPage=Math.min(totalPages,startPage+batch-1),btn=$('printPhotoSheets');
- const mode=$('printOutputMode')?.value||'paired',edge=$('printDuplexEdge')?.value||'long',labelMode=$('printBackLabel')?.value||'both';
+ const photoMode=$('printTargetMode')?.value==='photos',mode=$('printOutputMode')?.value||'paired',edge=$('printDuplexEdge')?.value||'long',labelMode=$('printBackLabel')?.value||'both';
+ const batch=+$('printBatchSize').value||5,startPage=+$('printStartPage').value||1;let pageItems=[],totalPages=0,endPage=0;
+ try{
+  if(photoMode){const ids=parsePhotoNumberList($('printPhotoNumbers').value,assignments.length);pageItems=ids.map(i=>[i]);totalPages=pageItems.length;endPage=totalPages;}
+  else{totalPages=Math.ceil(assignments.length/layout.perPage);if(!Number.isInteger(startPage)||startPage<1||startPage>totalPages)throw Error(`開始ページは1〜${totalPages}の範囲で指定してください。`);endPage=Math.min(totalPages,startPage+batch-1);for(let pg=startPage-1;pg<endPage;pg++){const from=pg*layout.perPage;pageItems.push(Array.from({length:Math.min(layout.perPage,assignments.length-from)},(_,k)=>from+k));}}
+ }catch(e){alert(e.message);return;}
+ if(photoMode){layout={...layout,cols:1,rows:1,perPage:1,gridW:layout.w,gridH:layout.h,gridX:(layout.contentW-layout.w)/2,gridY:(layout.contentH-layout.h)/2};}
+ const btn=$('printPhotoSheets');
  // Open synchronously from the tap so Safari does not block the print window after async reads.
  const win=window.open('','_blank');if(!win){alert('ポップアップを許可してから、もう一度実行してください。');return;}
- let urls=[];win.addEventListener('pagehide',()=>urls.forEach(URL.revokeObjectURL),{once:true});
- btn.disabled=true;$('printSheetStatus').textContent='写真と番号データを準備しています…';
+ let urls=[];win.addEventListener('pagehide',()=>urls.forEach(URL.revokeObjectURL),{once:true});btn.disabled=true;$('printSheetStatus').textContent='写真と番号データを準備しています…';
  try{
   photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p]));
   const missing=assignments.filter(id=>!byId.has(id)).length;if(missing)throw Error(`${missing}枚の写真データが見つかりません。写真を再登録してください。`);
   const gridMeta=await metaGet('grid')||{cols:60,rows:50},gridCols=gridMeta.cols||60;
-  const first=(startPage-1)*layout.perPage,last=Math.min(assignments.length,endPage*layout.perPage);
-  const batchPhotos=assignments.slice(first,last).map(id=>byId.get(id));
-  const urlMap=new Map();
-  if(mode!=='back')for(const p of batchPhotos){if(!urlMap.has(p.id)){const u=URL.createObjectURL(p.blob);urls.push(u);urlMap.set(p.id,u);}}
+  const batchIndices=pageItems.flat(),batchPhotos=batchIndices.map(i=>byId.get(assignments[i]));
+  const urlMap=new Map();if(mode!=='back')for(const ph of batchPhotos){if(!urlMap.has(ph.id)){const u=URL.createObjectURL(ph.blob);urls.push(u);urlMap.set(ph.id,u);}}
   const safe=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const pageHeight=layout.contentH;
-  let html=`<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>フォトモザイク表裏印刷 ${startPage}-${endPage}</title><style>
-   @page{size:${layout.paper} portrait;margin:${layout.margin}mm}*{box-sizing:border-box}body{font-family:Arial,"Noto Sans JP",sans-serif;margin:0;color:#111}.page{position:relative;width:100%;height:${pageHeight}mm;page-break-after:always;break-after:page;overflow:hidden}.page:last-child{page-break-after:auto;break-after:auto}.head{position:absolute;left:0;top:0;width:100%;height:${layout.headerH}mm;font-size:9pt;display:flex;justify-content:space-between;align-items:flex-start}.grid{position:absolute;left:${layout.gridX}mm;top:${layout.gridY}mm;display:grid;grid-template-columns:repeat(${layout.cols},${layout.w}mm);grid-auto-rows:${layout.h}mm;gap:0;justify-content:start;align-content:start}.cell{width:${layout.w}mm;height:${layout.h}mm;overflow:hidden;display:flex;align-items:center;justify-content:center;border:0;margin:0;padding:0}.cell img{display:block;width:${layout.w}mm;height:${layout.h}mm;object-fit:cover;border:0;margin:0;padding:0}.backcell{border:0;flex-direction:column;gap:.4mm;text-align:center}.backnum{font-family:Arial,sans-serif;font-size:${Math.max(7,Math.min(12,layout.w*.28))}pt;font-weight:800;line-height:1}.backcoord{font-family:Arial,sans-serif;font-size:${Math.max(4.5,Math.min(7,layout.w*.15))}pt;line-height:1.05;color:#333}.blank{border:0}.cropMarks{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible}.cropMarks line{stroke:#111;stroke-width:.25;vector-effect:non-scaling-stroke}@media screen{body{background:#e8edf4}.page{background:white;margin:12px auto;box-shadow:0 1px 8px #64748b55;width:${layout.contentW}mm;height:${layout.contentH}mm}.grid{justify-content:start}}
+  let html=`<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>フォトモザイク再印刷</title><style>
+   @page{size:${layout.paper} portrait;margin:${layout.margin}mm}*{box-sizing:border-box}body{font-family:Arial,"Noto Sans JP",sans-serif;margin:0;color:#111}.page{position:relative;width:100%;height:${pageHeight}mm;page-break-after:always;break-after:page;overflow:hidden}.page:last-child{page-break-after:auto;break-after:auto}.head{position:absolute;left:0;top:0;width:100%;height:${layout.headerH}mm;font-size:9pt;display:flex;justify-content:space-between;align-items:flex-start}.grid{position:absolute;left:${layout.gridX}mm;top:${layout.gridY}mm;display:grid;grid-template-columns:repeat(${layout.cols},${layout.w}mm);grid-auto-rows:${layout.h}mm;gap:0;justify-content:start;align-content:start}.cell{width:${layout.w}mm;height:${layout.h}mm;overflow:hidden;display:flex;align-items:center;justify-content:center;border:0;margin:0;padding:0}.cell img{display:block;width:${layout.w}mm;height:${layout.h}mm;object-fit:cover;border:0;margin:0;padding:0}.backcell{border:0;flex-direction:column;gap:.7mm;text-align:center}.backnum{font-family:Arial,sans-serif;font-size:${Math.max(11,Math.min(14,layout.w*.36))}pt;font-weight:800;line-height:1.05}.backcoord{font-family:Arial,"Noto Sans JP",sans-serif;font-size:${Math.max(7,Math.min(9,layout.w*.22))}pt;line-height:1.1;color:#222}.blank{border:0}.cropMarks{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible}.cropMarks line{stroke:#111;stroke-width:.25;vector-effect:non-scaling-stroke}@media screen{body{background:#e8edf4}.page{background:white;margin:12px auto;box-shadow:0 1px 8px #64748b55;width:${layout.contentW}mm;height:${layout.contentH}mm}.grid{justify-content:start}}
    </style></head><body>`;
-  const pageNums=Array.from({length:endPage-startPage+1},(_,k)=>startPage-1+k);
-  function pageHeader(pg,side){return `<div class="head"><b>フォトモザイク｜${side==='front'?'写真表面':'写真裏面・配置番号'}｜${layout.paper}｜用紙 ${pg+1}/${totalPages}</b><span>${side==='front'?'写真のみ・番号なし':edge==='long'?'長辺とじ用':'短辺とじ用'}</span></div>`;}
+  function pageHeader(pg,side){const label=photoMode?`写真番号 ${pageItems[pg][0]+1}`:`用紙 ${startPage+pg}/${totalPages}`;return `<div class="head"><b>フォトモザイク｜${side==='front'?'写真表面':'写真裏面・配置番号'}｜${layout.paper}｜${label}</b><span>${side==='front'?'写真のみ・番号なし':edge==='long'?'長辺とじ用':'短辺とじ用'}</span></div>`;}
   function cropMarkSvg(){
-   const lines=[];const x0=layout.gridX,y0=layout.gridY,x1=x0+layout.gridW,y1=y0+layout.gridH,L=layout.markLen;
-   for(let c=1;c<layout.cols;c++){const x=x0+c*layout.w;lines.push(`<line x1="${x}" y1="${y0-L}" x2="${x}" y2="${y0}"/><line x1="${x}" y1="${y1}" x2="${x}" y2="${y1+L}"/>`);}
-   for(let r=1;r<layout.rows;r++){const y=y0+r*layout.h;lines.push(`<line x1="${x0-L}" y1="${y}" x2="${x0}" y2="${y}"/><line x1="${x1}" y1="${y}" x2="${x1+L}" y2="${y}"/>`);}
+   const lines=[],x0=layout.gridX,y0=layout.gridY,x1=x0+layout.gridW,y1=y0+layout.gridH,L=layout.markLen;
+   // Every vertical tile boundary, including the two outside edges, gets marks in the top and bottom margins.
+   for(let c=0;c<=layout.cols;c++){const x=x0+c*layout.w;lines.push(`<line x1="${x}" y1="${y0-L}" x2="${x}" y2="${y0}"/><line x1="${x}" y1="${y1}" x2="${x}" y2="${y1+L}"/>`);}
+   // Every horizontal tile boundary, including the two outside edges, gets marks in the left and right margins.
+   for(let r=0;r<=layout.rows;r++){const y=y0+r*layout.h;lines.push(`<line x1="${x0-L}" y1="${y}" x2="${x0}" y2="${y}"/><line x1="${x1}" y1="${y}" x2="${x1+L}" y2="${y}"/>`);}
    return `<svg class="cropMarks" viewBox="0 0 ${layout.contentW} ${layout.contentH}" preserveAspectRatio="none" aria-hidden="true">${lines.join('')}</svg>`;
   }
-  function frontPage(pg){
-   const from=pg*layout.perPage,to=Math.min(assignments.length,from+layout.perPage);let out=`<section class="page">${cropMarkSvg()}${pageHeader(pg,'front')}<div class="grid">`;
-   for(let i=from;i<from+layout.perPage;i++){
-    if(i<to){const ph=byId.get(assignments[i]);out+=`<div class="cell"><img src="${urlMap.get(ph.id)}" alt="${safe(ph.name)}"></div>`;}else out+='<div class="cell blank"></div>';
-   }
+  function frontPage(pg){const indices=pageItems[pg];let out=`<section class="page">${cropMarkSvg()}${pageHeader(pg,'front')}<div class="grid">`;
+   for(let k=0;k<layout.perPage;k++){const i=indices[k];if(i!==undefined){const ph=byId.get(assignments[i]);out+=`<div class="cell"><img src="${urlMap.get(ph.id)}" alt="${safe(ph.name)}"></div>`;}else out+='<div class="cell blank"></div>';}
    return out+'</div></section>';
   }
-  function backPage(pg){
-   const from=pg*layout.perPage,to=Math.min(assignments.length,from+layout.perPage);let out=`<section class="page">${cropMarkSvg()}${pageHeader(pg,'back')}<div class="grid">`;
+  function backPage(pg){const indices=pageItems[pg];let out=`<section class="page">${cropMarkSvg()}${pageHeader(pg,'back')}<div class="grid">`;
    for(let r=0;r<layout.rows;r++)for(let c=0;c<layout.cols;c++){
-    let rr=r,cc=c;if(edge==='long')cc=layout.cols-1-c;else if(edge==='short')rr=layout.rows-1-r;
-    const local=rr*layout.cols+cc,i=from+local;
-    if(i<to){const row=Math.floor(i/gridCols)+1,col=(i%gridCols)+1,parts=[];
-     if(labelMode!=='coord')parts.push(`<b class="backnum">${String(i+1).padStart(4,'0')}</b>`);
-     if(labelMode!=='number')parts.push(`<small class="backcoord">${row}行・${col}列</small>`);
-     out+=`<div class="cell backcell">${parts.join('')}</div>`;
-    }else out+='<div class="cell blank"></div>';
+    let rr=r,cc=c;if(!photoMode&&edge==='long')cc=layout.cols-1-c;else if(!photoMode&&edge==='short')rr=layout.rows-1-r;
+    const local=rr*layout.cols+cc,i=indices[local];
+    if(i!==undefined){const row=Math.floor(i/gridCols)+1,col=(i%gridCols)+1,parts=[];if(labelMode!=='coord')parts.push(`<b class="backnum">${String(i+1).padStart(4,'0')}</b>`);if(labelMode!=='number')parts.push(`<small class="backcoord">${row}行・${col}列</small>`);out+=`<div class="cell backcell">${parts.join('')}</div>`;}else out+='<div class="cell blank"></div>';
    }
    return out+'</div></section>';
   }
-  for(const pg of pageNums){if(mode==='paired'){html+=frontPage(pg)+backPage(pg);}else if(mode==='front')html+=frontPage(pg);else html+=backPage(pg);}
+  for(let pg=0;pg<pageItems.length;pg++){if(mode==='paired'){html+=frontPage(pg)+backPage(pg);}else if(mode==='front')html+=frontPage(pg);else html+=backPage(pg);}
   html+=`<script>window.addEventListener('load',()=>{const imgs=[...document.images];Promise.all(imgs.map(i=>i.decode?i.decode().catch(()=>{}):new Promise(r=>{i.onload=i.onerror=r}))).then(()=>setTimeout(()=>window.print(),500));});<\/script></body></html>`;
   win.document.open();win.document.write(html);win.document.close();
   const sides=mode==='paired'?'表面・裏面を交互に出力':mode==='front'?'表面のみ':'裏面のみ';
-  $('printSheetStatus').textContent=`印刷データを準備しました。${startPage}〜${endPage}用紙／全${totalPages}用紙。${sides}。裏面番号は通し番号と座標を割り当てています。`;
-  $('printStartPage').value=Math.min(totalPages,endPage+1);updateTileScaleDisplay();updatePrintSheetInfo();
+  $('printSheetStatus').textContent=photoMode?`写真番号 ${batchIndices.map(i=>i+1).join(', ')} を個別再印刷するデータを準備しました。${sides}。`:`${startPage}〜${endPage}ページ／全${totalPages}ページから印刷データを準備しました。${sides}。`;
+  if(!photoMode){$('printStartPage').value=Math.min(totalPages,endPage+1);updatePrintSheetInfo();}
  }catch(e){urls.forEach(URL.revokeObjectURL);win.close();$('printSheetStatus').textContent='印刷準備に失敗しました：'+e.message;alert('印刷準備に失敗しました：'+e.message);}
  finally{btn.disabled=false;}
 };
