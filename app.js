@@ -267,6 +267,15 @@ $('previewTileSize').onchange=()=>{if(previewReady)renderMosaicPreview();};
 $('savePreview').onclick=()=>{if(!previewReady){alert('先にプレビューを作成してください。');return;}$('mosaicPreview').toBlob(blob=>{if(blob)download(blob,'photo_mosaic_preview.png');else alert('PNG画像を作成できませんでした。');},'image/png');};
 
 function updateDims(){let cols=+$('cols').value||60,rows=+$('rows').value||50,w=+$('tileW').value||38.1,h=+$('tileH').value||26.7,g=+$('gap').value||0,m=+$('margin').value||0;let W=cols*w+(cols-1)*g+2*m,H=rows*h+(rows-1)*g+2*m;$('dimensionText').textContent=`完成寸法（外周余白込み）：横 ${W.toFixed(1)}mm × 縦 ${H.toFixed(1)}mm`;}
+
+function updateTileScaleDisplay(){const pct=Number($('tileScale').value),w=127*pct/100,h=89*pct/100;$('tileW').value=w.toFixed(2);$('tileH').value=h.toFixed(2);$('tileSizeText').textContent=`${pct}%：${w.toFixed(2)} × ${h.toFixed(2)} mm`;$('printSizeInfo').textContent=`${pct}%（${w.toFixed(2)} × ${h.toFixed(2)} mm）`;}
+$('tileScale').addEventListener('change',async()=>{
+ const pct=Number($('tileScale').value);if(!Number.isFinite(pct)||pct<5||pct>100){alert('L判比率は5〜100%で指定してください。');$('tileScale').value='30';}
+ updateTileScaleDisplay();
+ const g=await metaGet('grid');if(g){g.tileW=Number($('tileW').value);g.tileH=Number($('tileH').value);g.physicalRatio=g.tileW/g.tileH;await metaPut('grid',g);}
+ updateDims();updatePrintSheetInfo();if(previewReady)await renderMosaicPreview();
+});
+
 $('updateDims').onclick=updateDims;
 async function exportCsv(){photos=await allPhotos();let map=new Map(photos.map(p=>[p.id,p.name]));let grid=await metaGet('grid')||{cols:60,rows:50};let lines=['番号,行,列,写真ファイル名,写真ID'];assignments.forEach((id,i)=>lines.push(`${i+1},${Math.floor(i/grid.cols)+1},${i%grid.cols+1},\"${(map.get(id)||'').replaceAll('\"','\"\"')}\",${id}`));download(new Blob(['\ufeff'+lines.join('\r\n')],{type:'text/csv;charset=utf-8'}),'photo_assignment.csv');}
 function download(blob,name){let a=document.createElement('a'),u=URL.createObjectURL(blob);a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),5000);}
@@ -331,25 +340,26 @@ async function runQualityCheck(){
 }
 $('runQuality').onclick=runQualityCheck;
 
-(async()=>{try{db=await openDB();let s=await metaGet('source');if(s){sourceBlob=s.blob;sourceName=s.name;$('sourceStatus').textContent=`原画：${s.name}`;}assignments=await metaGet('assignments')||[];let g=await metaGet('grid');if(g){$('cols').value=g.cols;$('rows').value=g.rows;}updateDims();await migrateExistingPhotos();await refreshStats();await renderPhotos();}catch(e){console.error(e);alert('ローカル保存または写真の最適化を開始できません。Safariの通常モードで開き、空き容量を確認してください。');}})();
+(async()=>{try{db=await openDB();let s=await metaGet('source');if(s){sourceBlob=s.blob;sourceName=s.name;$('sourceStatus').textContent=`原画：${s.name}`;}assignments=await metaGet('assignments')||[];let g=await metaGet('grid');if(g){$('cols').value=g.cols;$('rows').value=g.rows;if(g.tileW)$('tileScale').value=String(Math.round(g.tileW/127*100));}updateTileScaleDisplay();updateDims();await migrateExistingPhotos();await refreshStats();await renderPhotos();}catch(e){console.error(e);alert('ローカル保存または写真の最適化を開始できません。Safariの通常モードで開き、空き容量を確認してください。');}})();
 if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
 
 
 // v5: batch print without marks on the photo tiles; keep the index on a separate map.
 function getPrintLayout(){
- const paper=$('printPaper').value,w=Number($('printTileW').value),h=Number($('printTileH').value),gap=Number($('printGap').value),margin=Number($('printMargin').value);
- if(![w,h,gap,margin].every(Number.isFinite)||w<=0||h<=0||gap<0||margin<0)throw Error('印刷寸法は正の数（間隔・余白は0以上）で入力してください。');
- const pageW=paper==='A3'?297:210,pageH=paper==='A3'?420:297,usableW=pageW-2*margin,usableH=pageH-2*margin-10;
- const cols=Math.floor((usableW+gap)/(w+gap)),rows=Math.floor((usableH+gap)/(h+gap));
- if(cols<1||rows<1)throw Error('このタイル寸法では用紙に配置できません。余白や間隔を小さくしてください。');
- return {paper,w,h,gap,margin,cols,rows,perPage:cols*rows,pageW,pageH};
+ const paper=$('printPaper').value,w=Number($('tileW').value),h=Number($('tileH').value),margin=Number($('printMargin').value);
+ const gap=0,markLen=3,headerH=10;
+ if(![w,h,margin].every(Number.isFinite)||w<=0||h<=0||margin<0)throw Error('写真寸法は正の数、ページ余白は0以上で指定してください。');
+ const pageW=paper==='A3'?297:210,pageH=paper==='A3'?420:297,contentW=pageW-2*margin,contentH=pageH-2*margin;
+ const cols=Math.floor((contentW-2*markLen)/w),rows=Math.floor((contentH-headerH-2*markLen)/h);
+ if(cols<1||rows<1)throw Error('この写真サイズでは用紙に配置できません。L判比率を小さくするか、ページ余白を調整してください。');
+ const gridW=cols*w,gridH=rows*h,gridX=(contentW-gridW)/2,gridY=headerH+markLen;
+ return {paper,w,h,gap,margin,cols,rows,perPage:cols*rows,pageW,pageH,contentW,contentH,gridW,gridH,gridX,gridY,markLen,headerH};
 }
 function updatePrintSheetInfo(){
- try{const x=getPrintLayout(),n=assignments.length,pages=Math.ceil(n/x.perPage),batch=+$('printBatchSize').value||5,start=+$('printStartPage').value||1,end=Math.min(pages,start+batch-1);$('printSheetInfo').textContent=`${x.paper}縦／${x.cols}列 × ${x.rows}行＝1用紙${x.perPage}枚。全${pages.toLocaleString()}用紙。今回：${start}〜${Math.max(start,end)}用紙（最大${batch}用紙）。表面は写真のみ、裏面は番号・座標です。`; $('printStartPage').max=Math.max(1,pages);}
+ try{const x=getPrintLayout(),n=assignments.length,pages=Math.ceil(n/x.perPage),batch=+$('printBatchSize').value||5,start=+$('printStartPage').value||1,end=Math.min(pages,start+batch-1);$('printSheetInfo').textContent=`${x.paper}縦／${x.cols}列 × ${x.rows}行＝1用紙${x.perPage}枚。全${pages.toLocaleString()}用紙。写真間隔0mm・境界線なし・外周トンボあり。今回：${start}〜${Math.max(start,end)}用紙（最大${batch}用紙）。`; $('printStartPage').max=Math.max(1,pages);}
  catch(e){$('printSheetInfo').textContent=e.message;}
 }
-['printPaper','printTileW','printTileH','printGap','printMargin','printBatchSize','printStartPage','printOutputMode','printDuplexEdge','printBackLabel'].forEach(id=>$(id).addEventListener('change',updatePrintSheetInfo));
-// v9: front/back paired print sheets. Back labels are position-mirrored according to the selected duplex edge.
+['printPaper','printMargin','printBatchSize','printStartPage','printOutputMode','printDuplexEdge','printBackLabel'].forEach(id=>$(id).addEventListener('change',updatePrintSheetInfo));
 $('printPhotoSheets').onclick=async()=>{
  if(busy||previewBusy){alert('ほかの処理が終わってから実行してください。');return;}
  if(!assignments.length){alert('先に写真を自動配置してください。');return;}
@@ -371,21 +381,27 @@ $('printPhotoSheets').onclick=async()=>{
   const urlMap=new Map();
   if(mode!=='back')for(const p of batchPhotos){if(!urlMap.has(p.id)){const u=URL.createObjectURL(p.blob);urls.push(u);urlMap.set(p.id,u);}}
   const safe=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const pageHeight=layout.pageH-2*layout.margin,gridHeight=pageHeight-10;
+  const pageHeight=layout.contentH;
   let html=`<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>フォトモザイク表裏印刷 ${startPage}-${endPage}</title><style>
-   @page{size:${layout.paper} portrait;margin:${layout.margin}mm}*{box-sizing:border-box}body{font-family:Arial,"Noto Sans JP",sans-serif;margin:0;color:#111}.page{width:100%;height:${pageHeight}mm;page-break-after:always;break-after:page;overflow:hidden}.page:last-child{page-break-after:auto;break-after:auto}.head{height:10mm;font-size:9pt;display:flex;justify-content:space-between;align-items:flex-start}.grid{display:grid;grid-template-columns:repeat(${layout.cols},${layout.w}mm);grid-auto-rows:${layout.h}mm;column-gap:${layout.gap}mm;row-gap:${layout.gap}mm;justify-content:center;align-content:start}.cell{width:${layout.w}mm;height:${layout.h}mm;overflow:hidden;display:flex;align-items:center;justify-content:center}.cell img{display:block;width:${layout.w}mm;height:${layout.h}mm;object-fit:cover;border:0}.backcell{border:.18mm solid #9aa6b5;flex-direction:column;gap:.4mm;text-align:center}.backnum{font-family:Arial,sans-serif;font-size:${Math.max(7,Math.min(12,layout.w*.28))}pt;font-weight:800;line-height:1}.backcoord{font-family:Arial,sans-serif;font-size:${Math.max(4.5,Math.min(7,layout.w*.15))}pt;line-height:1.05;color:#333}.blank{border:0}@media screen{body{background:#e8edf4}.page{background:white;margin:12px auto;padding:0;box-shadow:0 1px 8px #64748b55;width:${layout.pageW-2*layout.margin}mm;min-height:${layout.pageH-2*layout.margin}mm;height:auto;padding-bottom:4mm}.grid{justify-content:center}}
+   @page{size:${layout.paper} portrait;margin:${layout.margin}mm}*{box-sizing:border-box}body{font-family:Arial,"Noto Sans JP",sans-serif;margin:0;color:#111}.page{position:relative;width:100%;height:${pageHeight}mm;page-break-after:always;break-after:page;overflow:hidden}.page:last-child{page-break-after:auto;break-after:auto}.head{position:absolute;left:0;top:0;width:100%;height:${layout.headerH}mm;font-size:9pt;display:flex;justify-content:space-between;align-items:flex-start}.grid{position:absolute;left:${layout.gridX}mm;top:${layout.gridY}mm;display:grid;grid-template-columns:repeat(${layout.cols},${layout.w}mm);grid-auto-rows:${layout.h}mm;gap:0;justify-content:start;align-content:start}.cell{width:${layout.w}mm;height:${layout.h}mm;overflow:hidden;display:flex;align-items:center;justify-content:center;border:0;margin:0;padding:0}.cell img{display:block;width:${layout.w}mm;height:${layout.h}mm;object-fit:cover;border:0;margin:0;padding:0}.backcell{border:0;flex-direction:column;gap:.4mm;text-align:center}.backnum{font-family:Arial,sans-serif;font-size:${Math.max(7,Math.min(12,layout.w*.28))}pt;font-weight:800;line-height:1}.backcoord{font-family:Arial,sans-serif;font-size:${Math.max(4.5,Math.min(7,layout.w*.15))}pt;line-height:1.05;color:#333}.blank{border:0}.cropMarks{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible}.cropMarks line{stroke:#111;stroke-width:.25;vector-effect:non-scaling-stroke}@media screen{body{background:#e8edf4}.page{background:white;margin:12px auto;box-shadow:0 1px 8px #64748b55;width:${layout.contentW}mm;height:${layout.contentH}mm}.grid{justify-content:start}}
    </style></head><body>`;
   const pageNums=Array.from({length:endPage-startPage+1},(_,k)=>startPage-1+k);
   function pageHeader(pg,side){return `<div class="head"><b>フォトモザイク｜${side==='front'?'写真表面':'写真裏面・配置番号'}｜${layout.paper}｜用紙 ${pg+1}/${totalPages}</b><span>${side==='front'?'写真のみ・番号なし':edge==='long'?'長辺とじ用':'短辺とじ用'}</span></div>`;}
+  function cropMarkSvg(){
+   const lines=[];const x0=layout.gridX,y0=layout.gridY,x1=x0+layout.gridW,y1=y0+layout.gridH,L=layout.markLen;
+   for(let c=1;c<layout.cols;c++){const x=x0+c*layout.w;lines.push(`<line x1="${x}" y1="${y0-L}" x2="${x}" y2="${y0}"/><line x1="${x}" y1="${y1}" x2="${x}" y2="${y1+L}"/>`);}
+   for(let r=1;r<layout.rows;r++){const y=y0+r*layout.h;lines.push(`<line x1="${x0-L}" y1="${y}" x2="${x0}" y2="${y}"/><line x1="${x1}" y1="${y}" x2="${x1+L}" y2="${y}"/>`);}
+   return `<svg class="cropMarks" viewBox="0 0 ${layout.contentW} ${layout.contentH}" preserveAspectRatio="none" aria-hidden="true">${lines.join('')}</svg>`;
+  }
   function frontPage(pg){
-   const from=pg*layout.perPage,to=Math.min(assignments.length,from+layout.perPage);let out=`<section class="page">${pageHeader(pg,'front')}<div class="grid">`;
+   const from=pg*layout.perPage,to=Math.min(assignments.length,from+layout.perPage);let out=`<section class="page">${cropMarkSvg()}${pageHeader(pg,'front')}<div class="grid">`;
    for(let i=from;i<from+layout.perPage;i++){
     if(i<to){const ph=byId.get(assignments[i]);out+=`<div class="cell"><img src="${urlMap.get(ph.id)}" alt="${safe(ph.name)}"></div>`;}else out+='<div class="cell blank"></div>';
    }
    return out+'</div></section>';
   }
   function backPage(pg){
-   const from=pg*layout.perPage,to=Math.min(assignments.length,from+layout.perPage);let out=`<section class="page">${pageHeader(pg,'back')}<div class="grid">`;
+   const from=pg*layout.perPage,to=Math.min(assignments.length,from+layout.perPage);let out=`<section class="page">${cropMarkSvg()}${pageHeader(pg,'back')}<div class="grid">`;
    for(let r=0;r<layout.rows;r++)for(let c=0;c<layout.cols;c++){
     let rr=r,cc=c;if(edge==='long')cc=layout.cols-1-c;else if(edge==='short')rr=layout.rows-1-r;
     const local=rr*layout.cols+cc,i=from+local;
@@ -402,7 +418,7 @@ $('printPhotoSheets').onclick=async()=>{
   win.document.open();win.document.write(html);win.document.close();
   const sides=mode==='paired'?'表面・裏面を交互に出力':mode==='front'?'表面のみ':'裏面のみ';
   $('printSheetStatus').textContent=`印刷データを準備しました。${startPage}〜${endPage}用紙／全${totalPages}用紙。${sides}。裏面番号は通し番号と座標を割り当てています。`;
-  $('printStartPage').value=Math.min(totalPages,endPage+1);updatePrintSheetInfo();
+  $('printStartPage').value=Math.min(totalPages,endPage+1);updateTileScaleDisplay();updatePrintSheetInfo();
  }catch(e){urls.forEach(URL.revokeObjectURL);win.close();$('printSheetStatus').textContent='印刷準備に失敗しました：'+e.message;alert('印刷準備に失敗しました：'+e.message);}
  finally{btn.disabled=false;}
 };
