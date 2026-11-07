@@ -1,10 +1,10 @@
 {
   "name": "フォトモザイク制作室",
   "short_name": "モザイク制作",
-  "description": "写真モザイク制作・分割印刷・品質評価ツール v9",
+  "description": "写真モザイク制作・分割印刷・品質評価ツール v15",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#f4f6fa",
-  "theme_color": "#172033",
+  "background_color": "#f3f5f6",
+  "theme_color": "#263746",
   "lang": "ja"
 }
