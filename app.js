@@ -5,6 +5,8 @@ const $=id=>document.getElementById(id);
 function openDB(){return new Promise((resolve,reject)=>{let r=indexedDB.open(DB,1);r.onupgradeneeded=()=>{let d=r.result;d.createObjectStore(STORE,{keyPath:'id'});d.createObjectStore(META,{keyPath:'key'});};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});}
 function tx(store,mode='readonly'){return db.transaction(store,mode).objectStore(store)}
 function allPhotos(){return new Promise((res,rej)=>{let r=tx(STORE).getAll();r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});}
+function photoCount(){return new Promise((res,rej)=>{const r=tx(STORE).count();r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});}
+function photoPageData(offset,limit){return new Promise((res,rej)=>{const out=[],r=tx(STORE).openCursor();let skipped=0;r.onerror=()=>rej(r.error);r.onsuccess=()=>{const c=r.result;if(!c){res(out);return;}if(skipped++<offset){c.continue();return;}out.push(c.value);if(out.length>=limit){res(out);return;}c.continue();};});}
 function putPhoto(p){return new Promise((res,rej)=>{let r=tx(STORE,'readwrite').put(p);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
 function putPhotos(items){return new Promise((res,rej)=>{const t=db.transaction(STORE,'readwrite'),st=t.objectStore(STORE);for(const p of items)st.put(p);t.oncomplete=()=>res();t.onerror=()=>rej(t.error);t.onabort=()=>rej(t.error||new Error('写真データの保存に失敗しました。'));});}
 function clearStore(){return new Promise((res,rej)=>{let r=tx(STORE,'readwrite').clear();r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
@@ -16,24 +18,24 @@ function metaPut(key,value){return new Promise((res,rej)=>{let r=tx(META,'readwr
 function metaGet(key){return new Promise(res=>{let r=tx(META).get(key);r.onsuccess=()=>res(r.result?.value);r.onerror=()=>res(null);});}
 function showTab(name){document.querySelectorAll('.view').forEach(x=>x.classList.toggle('hidden',x.id!==name));document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(name==='photos'){renderPhotos();refreshStats();}if(name==='output')updateDims();if(name==='quality')initCropPreview();}
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
-async function refreshStats(){photos=await allPhotos();$('count').textContent=photos.length.toLocaleString();$('placed').textContent=assignments.length.toLocaleString();$('outputStatus').textContent=assignments.length?`${assignments.length.toLocaleString()}マスに配置済み`:'配置データがありません。';}
+async function refreshStats(){const count=await photoCount();$('count').textContent=count.toLocaleString();$('placed').textContent=assignments.length.toLocaleString();$('outputStatus').textContent=assignments.length?`${assignments.length.toLocaleString()}マスに配置済み`:'配置データがありません。';}
 function blobURL(blob){return URL.createObjectURL(blob)}
 async function renderPhotos(){
- photos=await allPhotos();photoGridUrls.forEach(URL.revokeObjectURL);photoGridUrls=[];
- const total=Math.max(1,Math.ceil(photos.length/PHOTO_PAGE_SIZE));photoPage=Math.min(photoPage,total-1);
- const sel=$('photoPage');if(sel){const old=String(photoPage);sel.innerHTML='';for(let i=0;i<total;i++){const from=i*PHOTO_PAGE_SIZE+1,to=Math.min(photos.length,(i+1)*PHOTO_PAGE_SIZE),o=document.createElement('option');o.value=i;o.textContent=`${i+1}ページ目（${from}〜${to}）`;sel.append(o);}sel.value=String(photoPage);}
- const from=photoPage*PHOTO_PAGE_SIZE,to=Math.min(photos.length,from+PHOTO_PAGE_SIZE),grid=$('photoGrid');grid.innerHTML='';
- for(const p of photos.slice(from,to)){
+ const count=await photoCount();photoGridUrls.forEach(URL.revokeObjectURL);photoGridUrls=[];
+ const total=Math.max(1,Math.ceil(count/PHOTO_PAGE_SIZE));photoPage=Math.min(photoPage,total-1);photos=await photoPageData(photoPage*PHOTO_PAGE_SIZE,PHOTO_PAGE_SIZE);
+ const sel=$('photoPage');if(sel){const old=String(photoPage);sel.innerHTML='';for(let i=0;i<total;i++){const from=i*PHOTO_PAGE_SIZE+1,to=Math.min(count,(i+1)*PHOTO_PAGE_SIZE),o=document.createElement('option');o.value=i;o.textContent=`${i+1}ページ目（${from}〜${to}）`;sel.append(o);}sel.value=String(photoPage);}
+ const from=photoPage*PHOTO_PAGE_SIZE,to=Math.min(count,from+PHOTO_PAGE_SIZE),grid=$('photoGrid');grid.innerHTML='';
+ for(const p of photos){
   const card=document.createElement('div');card.className='photo-card';const img=document.createElement('img');img.src=blobURL(p.thumb||p.blob);photoGridUrls.push(img.src);img.alt=p.name;img.title=p.name;
   const label=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.checked=selectedPhotoIds.has(p.id);check.onchange=()=>{if(check.checked)selectedPhotoIds.add(p.id);else selectedPhotoIds.delete(p.id);updatePhotoSelectionCount();};const name=document.createElement('span');name.textContent=p.name;name.title=p.name;label.append(check,name);card.append(img,label);grid.append(card);
  }
- $('photoPageInfo').textContent=`${photos.length?from+1:0}〜${to} / ${photos.length.toLocaleString()}枚`;
- $('importStatus').textContent=`登録：${photos.length.toLocaleString()}枚（${total}ページ・1ページ${PHOTO_PAGE_SIZE}枚）`;
+ $('photoPageInfo').textContent=`${count?from+1:0}〜${to} / ${count.toLocaleString()}枚`;
+ $('importStatus').textContent=`登録：${count.toLocaleString()}枚（${total}ページ・1ページ${PHOTO_PAGE_SIZE}枚）`;
  updatePhotoSelectionCount();
 }
 function updatePhotoSelectionCount(){const b=$('deleteSelectedPhotos');if(b)b.textContent=`選択した写真を削除（${selectedPhotoIds.size}）`;}
 $('photoPage').onchange=async e=>{photoPage=+e.target.value||0;await renderPhotos();};
-$('selectPhotoPage').onclick=async()=>{const from=photoPage*PHOTO_PAGE_SIZE,to=Math.min(photos.length,from+PHOTO_PAGE_SIZE);for(const p of photos.slice(from,to))selectedPhotoIds.add(p.id);await renderPhotos();};
+$('selectPhotoPage').onclick=async()=>{for(const p of photos)selectedPhotoIds.add(p.id);await renderPhotos();};
 $('clearPhotoSelection').onclick=async()=>{selectedPhotoIds.clear();await renderPhotos();};
 $('deleteSelectedPhotos').onclick=async()=>{
  if(!selectedPhotoIds.size){alert('削除する写真を選択してください。');return;}
@@ -67,19 +69,20 @@ async function optimizeImageBlob(input){
  }finally{if(bmp)bmp.close();}
 }
 async function addFiles(files){
- if(busy)return;busy=true;let good=0,skip=0,saved=0,original=0;let start=(await allPhotos()).length;
+ if(busy)return;busy=true;let good=0,skip=0,saved=0,original=0;const start=await photoCount(),pending=[];
  try{
   for(let i=0;i<files.length;i++){
    const f=files[i];
    if(!f.type.startsWith('image/'))skip++;
    else try{
     const z=await optimizeImageBlob(f),id=crypto.randomUUID();
-    await putPhoto({id,name:f.name,blob:z.blob,thumb:z.thumb,width:z.width,height:z.height,optimized:true,originalBytes:f.size,savedBytes:z.blob.size+z.thumb.size});
+    pending.push({id,name:f.name,blob:z.blob,thumb:z.thumb,width:z.width,height:z.height,optimized:true,originalBytes:f.size,savedBytes:z.blob.size+z.thumb.size});
     good++;original+=f.size;saved+=z.blob.size+z.thumb.size;
    }catch(err){skip++;}
+   if(pending.length>=20||i===files.length-1){if(pending.length){await putPhotos(pending.splice(0));}}
    setProgress('importProgress',(i+1)/Math.max(1,files.length)*100);
    $('importStatus').textContent=`最適化して取り込み中 ${i+1}/${files.length}｜成功 ${good}枚｜保存 ${(saved/1048576).toFixed(1)}MB`;
-   if(i%4===0)await new Promise(r=>setTimeout(r,0));
+   if(i%4===0)await yieldUI();
   }
  }finally{busy=false;}
  await renderPhotos();await refreshStats();
@@ -357,7 +360,7 @@ function getPrintLayout(){
 }
 function updatePrintSheetInfo(){
  try{const x=getPrintLayout(),n=assignments.length,pages=Math.ceil(n/x.perPage),batch=+$('printBatchSize').value||5,start=+$('printStartPage').value||1,end=Math.min(pages,start+batch-1),photoMode=$('printTargetMode')?.value==='photos';
-  $('printSheetInfo').textContent=photoMode?`写真番号を指定して個別再印刷します。例：12,18,25-28。現在 ${n.toLocaleString()}枚。写真間隔0mm・境界線なし・外周全辺トンボあり。`:`${x.paper}縦／${x.cols}列 × ${x.rows}行＝1用紙${x.perPage}枚。全${pages.toLocaleString()}用紙。写真間隔0mm・境界線なし・外周全辺トンボあり。今回：${start}〜${Math.max(start,end)}用紙（最大${batch}用紙）。`;
+  $('printSheetInfo').textContent=photoMode?`写真番号を指定して個別再印刷します。例：12,18,25-28。現在 ${n.toLocaleString()}枚。写真間隔0mm・表面は境界線なし・裏面は全境界裁断線＋外周トンボあり。`:`${x.paper}縦／${x.cols}列 × ${x.rows}行＝1用紙${x.perPage}枚。全${pages.toLocaleString()}用紙。写真間隔0mm・表面は境界線なし・裏面は全境界裁断線＋外周トンボあり。今回：${start}〜${Math.max(start,end)}用紙（最大${batch}用紙）。`;
   $('printStartPage').max=Math.max(1,pages);$('printPhotoNumbersWrap').classList.toggle('hidden',!photoMode);$('printStartPageWrap').classList.toggle('hidden',photoMode);$('printBatchSizeWrap').classList.toggle('hidden',photoMode);
  }catch(e){$('printSheetInfo').textContent=e.message;}
 }
@@ -386,15 +389,15 @@ $('printPhotoSheets').onclick=async()=>{
  const win=window.open('','_blank');if(!win){alert('ポップアップを許可してから、もう一度実行してください。');return;}
  let urls=[];win.addEventListener('pagehide',()=>urls.forEach(URL.revokeObjectURL),{once:true});btn.disabled=true;$('printSheetStatus').textContent='写真と番号データを準備しています…';
  try{
-  photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p]));
-  const missing=assignments.filter(id=>!byId.has(id)).length;if(missing)throw Error(`${missing}枚の写真データが見つかりません。写真を再登録してください。`);
   const gridMeta=await metaGet('grid')||{cols:60,rows:50},gridCols=gridMeta.cols||60;
-  const batchIndices=pageItems.flat(),batchPhotos=batchIndices.map(i=>byId.get(assignments[i]));
+  const batchIndices=pageItems.flat(),batchPhotos=await Promise.all(batchIndices.map(i=>getPhoto(assignments[i])));
+  const missing=batchPhotos.filter(p=>!p).length;if(missing)throw Error(`${missing}枚の写真データが見つかりません。写真を再登録してください。`);
+  const byId=new Map(batchPhotos.filter(Boolean).map(p=>[p.id,p]));
   const urlMap=new Map();if(mode!=='back')for(const ph of batchPhotos){if(!urlMap.has(ph.id)){const u=URL.createObjectURL(ph.blob);urls.push(u);urlMap.set(ph.id,u);}}
   const safe=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const pageHeight=layout.contentH;
   let html=`<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>フォトモザイク再印刷</title><style>
-   @page{size:${layout.paper} portrait;margin:${layout.margin}mm}*{box-sizing:border-box}body{font-family:Arial,"Noto Sans JP",sans-serif;margin:0;color:#111}.page{position:relative;width:100%;height:${pageHeight}mm;page-break-after:always;break-after:page;overflow:hidden}.page:last-child{page-break-after:auto;break-after:auto}.head{position:absolute;left:0;top:0;width:100%;height:${layout.headerH}mm;font-size:9pt;display:flex;justify-content:space-between;align-items:flex-start}.grid{position:absolute;left:${layout.gridX}mm;top:${layout.gridY}mm;display:grid;grid-template-columns:repeat(${layout.cols},${layout.w}mm);grid-auto-rows:${layout.h}mm;gap:0;justify-content:start;align-content:start}.cell{width:${layout.w}mm;height:${layout.h}mm;overflow:hidden;display:flex;align-items:center;justify-content:center;border:0;margin:0;padding:0}.cell img{display:block;width:${layout.w}mm;height:${layout.h}mm;object-fit:cover;border:0;margin:0;padding:0}.backcell{border:0;flex-direction:column;gap:.7mm;text-align:center}.backnum{font-family:Arial,sans-serif;font-size:${Math.max(11,Math.min(14,layout.w*.36))}pt;font-weight:800;line-height:1.05}.backcoord{font-family:Arial,"Noto Sans JP",sans-serif;font-size:${Math.max(7,Math.min(9,layout.w*.22))}pt;line-height:1.1;color:#222}.blank{border:0}.cropMarks{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible}.cropMarks line{stroke:#111;stroke-width:.25;vector-effect:non-scaling-stroke}@media screen{body{background:#e8edf4}.page{background:white;margin:12px auto;box-shadow:0 1px 8px #64748b55;width:${layout.contentW}mm;height:${layout.contentH}mm}.grid{justify-content:start}}
+   @page{size:${layout.paper} portrait;margin:${layout.margin}mm}*{box-sizing:border-box}body{font-family:Arial,"Noto Sans JP",sans-serif;margin:0;color:#111}.page{position:relative;width:100%;height:${pageHeight}mm;page-break-after:always;break-after:page;overflow:hidden}.page:last-child{page-break-after:auto;break-after:auto}.head{position:absolute;left:0;top:0;width:100%;height:${layout.headerH}mm;font-size:9pt;display:flex;justify-content:space-between;align-items:flex-start}.grid{position:absolute;left:${layout.gridX}mm;top:${layout.gridY}mm;display:grid;grid-template-columns:repeat(${layout.cols},${layout.w}mm);grid-auto-rows:${layout.h}mm;gap:0;justify-content:start;align-content:start}.cell{width:${layout.w}mm;height:${layout.h}mm;overflow:hidden;display:flex;align-items:center;justify-content:center;border:0;margin:0;padding:0}.cell img{display:block;width:${layout.w}mm;height:${layout.h}mm;object-fit:cover;border:0;margin:0;padding:0}.backcell{border:0;flex-direction:column;gap:.7mm;text-align:center}.backnum{font-family:Arial,sans-serif;font-size:${Math.max(11,Math.min(14,layout.w*.36))}pt;font-weight:800;line-height:1.05}.backcoord{font-family:Arial,"Noto Sans JP",sans-serif;font-size:${Math.max(7,Math.min(9,layout.w*.22))}pt;line-height:1.1;color:#222}.blank{border:0}.cropMarks{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible}.cropMarks line{stroke:#111;stroke-width:.25;vector-effect:non-scaling-stroke}.cutLines{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible}.cutLines line{stroke:#777;stroke-width:.18;vector-effect:non-scaling-stroke}@media screen{body{background:#e8edf4}.page{background:white;margin:12px auto;box-shadow:0 1px 8px #64748b55;width:${layout.contentW}mm;height:${layout.contentH}mm}.grid{justify-content:start}}
    </style></head><body>`;
   function pageHeader(pg,side){const label=photoMode?`写真番号 ${pageItems[pg][0]+1}`:`用紙 ${startPage+pg}/${totalPages}`;return `<div class="head"><b>フォトモザイク｜${side==='front'?'写真表面':'写真裏面・配置番号'}｜${layout.paper}｜${label}</b><span>${side==='front'?'写真のみ・番号なし':edge==='long'?'長辺とじ用':'短辺とじ用'}</span></div>`;}
   function cropMarkSvg(){
@@ -405,11 +408,17 @@ $('printPhotoSheets').onclick=async()=>{
    for(let r=0;r<=layout.rows;r++){const y=y0+r*layout.h;lines.push(`<line x1="${x0-L}" y1="${y}" x2="${x0}" y2="${y}"/><line x1="${x1}" y1="${y}" x2="${x1+L}" y2="${y}"/>`);}
    return `<svg class="cropMarks" viewBox="0 0 ${layout.contentW} ${layout.contentH}" preserveAspectRatio="none" aria-hidden="true">${lines.join('')}</svg>`;
   }
+  function cutLineSvg(){
+   const lines=[],x0=layout.gridX,y0=layout.gridY,x1=x0+layout.gridW,y1=y0+layout.gridH;
+   for(let c=0;c<=layout.cols;c++){const x=x0+c*layout.w;lines.push(`<line x1="${x}" y1="${y0}" x2="${x}" y2="${y1}"/>`);}
+   for(let r=0;r<=layout.rows;r++){const y=y0+r*layout.h;lines.push(`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}"/>`);}
+   return `<svg class="cutLines" viewBox="0 0 ${layout.contentW} ${layout.contentH}" preserveAspectRatio="none" aria-hidden="true">${lines.join('')}</svg>`;
+  }
   function frontPage(pg){const indices=pageItems[pg];let out=`<section class="page">${cropMarkSvg()}${pageHeader(pg,'front')}<div class="grid">`;
    for(let k=0;k<layout.perPage;k++){const i=indices[k];if(i!==undefined){const ph=byId.get(assignments[i]);out+=`<div class="cell"><img src="${urlMap.get(ph.id)}" alt="${safe(ph.name)}"></div>`;}else out+='<div class="cell blank"></div>';}
    return out+'</div></section>';
   }
-  function backPage(pg){const indices=pageItems[pg];let out=`<section class="page">${cropMarkSvg()}${pageHeader(pg,'back')}<div class="grid">`;
+  function backPage(pg){const indices=pageItems[pg];let out=`<section class="page">${cropMarkSvg()}${cutLineSvg()}${pageHeader(pg,'back')}<div class="grid">`;
    for(let r=0;r<layout.rows;r++)for(let c=0;c<layout.cols;c++){
     let rr=r,cc=c;if(!photoMode&&edge==='long')cc=layout.cols-1-c;else if(!photoMode&&edge==='short')rr=layout.rows-1-r;
     const local=rr*layout.cols+cc,i=indices[local];
@@ -431,7 +440,7 @@ let cropPreviewUrls=[];
 async function renderCropPreview(){
  const grid=$('cropPreviewGrid');cropPreviewUrls.forEach(URL.revokeObjectURL);cropPreviewUrls=[];grid.innerHTML='';
  if(!assignments.length){$('cropPreviewInfo').textContent='配置データがありません。';$('cropPreviewStatus').textContent='先に自動配置してください。';return;}
- photos=await allPhotos();const byId=new Map(photos.map(p=>[p.id,p])),pageSize=100,total=Math.ceil(assignments.length/pageSize),page=Math.min(total-1,Math.max(0,+$('cropPreviewPage').value||0)),from=page*pageSize,to=Math.min(assignments.length,from+pageSize);
+ const pageSize=100,total=Math.ceil(assignments.length/pageSize),page=Math.min(total-1,Math.max(0,+$('cropPreviewPage').value||0)),from=page*pageSize,to=Math.min(assignments.length,from+pageSize),pagePhotos=await Promise.all(assignments.slice(from,to).map(id=>getPhoto(id))),byId=new Map(pagePhotos.filter(Boolean).map(p=>[p.id,p]));
  const fragment=document.createDocumentFragment();let missing=0;
  for(let i=from;i<to;i++){
   const p=byId.get(assignments[i]);if(!p){missing++;continue;}
